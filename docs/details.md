@@ -46,6 +46,50 @@ Claude chats follow the App's own controls:
 | Reasoning effort | effort (`ultra` = `max` + proactive sub-agents) |
 | Fast | Claude fast mode |
 
+## Antigravity chats
+
+With Google's [Antigravity CLI](https://antigravity.google/docs/cli/acp/) on the machine
+(`curl -fsSL https://antigravity.google/cli/install.sh | bash`, then sign in once with
+`ccodex auth antigravity`), the model picker also lists the models it offers your Google
+account (ids `antigravity:…`): Gemini models, and the Claude and GPT-OSS models it serves,
+marked *(Antigravity)*. A chat started with one runs on the CLI's ACP server (`agy acp`).
+Without the CLI, CCodex lists no Antigravity models; `ccodex doctor` says whether it found
+one. (Google stopped serving the Gemini CLI to personal accounts on June 18, 2026;
+Antigravity is its replacement.)
+
+The CLI lists each model once per reasoning effort (`gemini-4-carbon-low`, `…-medium`,
+`…-high`). The picker lists the model once, with those efforts on the App's effort control.
+
+In an Antigravity chat the App shows the answer and the thinking as they stream, commands
+with their output, file changes with their diffs, and its approval prompts. Plan mode, Stop,
+queued messages, images, fork, message edits, side chats, rename, archive, delete, search,
+the context meter, `/cc` and titles (with a ` ✦` suffix) work as in other chats.
+
+| Codex App | Antigravity CLI mode |
+|---|---|
+| *Ask for approval* | `default`: asks before edits and commands |
+| *Approve for me* | `auto`: edits and safe commands go through, it asks before irreversible actions |
+| *Full Access* | `auto`, and CCodex allows what it still asks about |
+| Plan mode | `plan` |
+
+Not supported in Antigravity chats:
+
+- Switching a chat that has messages to or from another provider: pick the model for a new
+  chat before its first message. (A new chat the App opened with an Antigravity model can
+  still become a Claude chat before that, but not a GPT one: open another new chat for GPT.)
+- A message sent into a running turn (queue it instead), `/goal`, `/compact` (the CLI
+  compresses a long chat itself) and `/review`.
+- Plan limits: the CLI reports none.
+- A command the agent moves to the background shows as run when the turn ends; its later
+  output doesn't reach the chat.
+- Chats from `agy` in a terminal don't show up in the App.
+
+CCodex keeps an Antigravity chat's history in `~/.ccodex/state/antigravity/<thread id>.jsonl`,
+an append-only log; a deleted chat's log goes to the trash like a Claude transcript. The CLI
+keeps the model's context in a session of its own. After a fork, an edit or a rollback, or
+when the CLI no longer has the session, the chat's next message opens a new session and
+brings the chat so far along as a transcript.
+
 ## How it works
 
 CCodex is a thin gateway in front of your installed `codex app-server`: the App starts
@@ -123,6 +167,8 @@ Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
   App shows a remote host's image or video): a bigger answer fails, a bigger notification is dropped, the output stops
   there. One huge message holds up every chat over SSH and can drop the phone's connection. `0` turns it off.
 - `log_level` — `debug`, `info` (default), `warn`, `error`.
+- `antigravity_binary` — use a specific Antigravity CLI. Without it CCodex runs the first `agy` on `PATH`, or the one in
+  `~/.local/bin` (where its installer puts it), `/opt/homebrew/bin` or `/usr/local/bin`.
 - `codex_binary`, `delegate_codex`, `claude_binary` — use a specific `codex` or `claude`. Without `codex_binary`, the
   gateway runs Desktop's own Codex CLI when the Desktop on this machine starts it (the one Desktop runs without
   CCodex), otherwise the newest `codex` on the machine; a plain `codex …` in a terminal runs the first one on PATH.

@@ -116,7 +116,18 @@ async function statusText(gateway: Gateway, connection: Connection, threadId: st
   let header: string;
   let cwd: string;
   let actions: { at: number; text: string }[] = [];
-  if (gateway.isClaudeThread(threadId)) {
+  if (gateway.antigravity.owns(threadId)) {
+    const state = gateway.antigravity.state(threadId);
+    header = [`**✦ ${state.model}**`, state.effort && capital(state.effort), PERMISSIONS[state.permissionMode] ?? state.permissionMode, state.plan && "Plan",
+      state.turnId ? "🟢 Running" : state.process ? "🟢 Ready" : "🟡 Idle"].filter(Boolean).join(" · ");
+    if (state.context?.size) {
+      const percent = Math.round(100 * state.context.used / state.context.size);
+      rows.push(`| **Context** | ${bar(percent)} ${percent}% · ${tokens(state.context.used)} / ${tokens(state.context.size)} |`);
+    }
+    session.push(state.turnId ? "working on a turn" : state.process ? "Antigravity CLI process running" : state.loaded
+      ? "process closed, the next message starts it again" : "not opened since the gateway started");
+    cwd = state.cwd;
+  } else if (gateway.isClaudeThread(threadId)) {
     const state = gateway.claude.state(current);
     const usage = state.lastUsage as JsonObject | undefined;
     const status = state.turnId ? "🟢 Running" : state.process ? "🟢 Ready" : "🟡 Idle";
@@ -173,6 +184,7 @@ async function answer(gateway: Gateway, connection: Connection, threadId: string
 /** The thread's running turn, if any. */
 async function runningTurn(gateway: Gateway, connection: Connection, threadId: string): Promise<string | undefined> {
   const current = gateway.meta.lineage(threadId)?.at(-1)?.threadId ?? threadId;
+  if (gateway.antigravity.owns(threadId)) return gateway.antigravity.state(threadId).turnId ?? undefined;
   if (gateway.isClaudeThread(threadId)) return gateway.claude.state(current).turnId ?? undefined;
   const { data } = await connection.upstream.request("thread/turns/list", { threadId: current, limit: 1, sortDirection: "desc", itemsView: "notLoaded" });
   return data[0]?.status === "inProgress" ? data[0].id : undefined;
