@@ -1,4 +1,4 @@
-// The App's permission controls as Gemini CLI approval modes, and its approval answers as ACP permission outcomes.
+// The App's permission controls as Antigravity CLI modes, and its approval answers as ACP permission outcomes.
 // All pure.
 import { codexPermissions, permissionSettings, type CodexPermissions } from "../claude/sdk.js";
 import type { JsonObject, ThreadItem } from "../protocol/codex.js";
@@ -6,38 +6,41 @@ import type { JsonObject, ThreadItem } from "../protocol/codex.js";
 /** The App's permission choice, named as the Claude layer names it (one mapping of the App's fields for both). */
 export type PermissionChoice = Parameters<typeof permissionSettings>[1]["permissionMode"];
 
-export interface GeminiSettings {
+export interface AntigravitySettings {
   readonly cwd: string;
-  /** The Gemini CLI's model id (`auto`, `gemini-2.5-pro`, …). */
+  /** The picker's model (`gemini-4-carbon`), without its effort. */
   readonly model: string;
+  /** The reasoning effort picked for it; null: the model's default. */
+  readonly effort: string | null;
   readonly permissionMode: PermissionChoice;
   readonly plan: boolean;
 }
 
-/** The Gemini CLI's approval modes (ACP session modes). */
-export type GeminiMode = "default" | "autoEdit" | "yolo" | "plan";
+/** The Antigravity CLI's modes (ACP session modes). */
+export type AntigravityMode = "default" | "accept-edits" | "auto" | "plan";
 
 /**
- * | Codex App | Gemini CLI |
- * | Full Access | `yolo` | Ask for approval | `default` | Approve for me | `autoEdit` (edits go through, commands ask) |
- * | Plan mode | `plan`, where the CLI has it |
+ * | Codex App | Antigravity CLI |
+ * | Ask for approval | `default`: asks before edits and commands |
+ * | Approve for me | `auto`: edits and safe commands go through, it asks before irreversible actions |
+ * | Full Access | `auto`, and CCodex allows what it still asks about |
+ * | Plan mode | `plan` |
  * `available`: the modes the session offers (none known yet: all).
  */
-export function geminiMode(settings: Pick<GeminiSettings, "permissionMode" | "plan">, available?: readonly string[]): GeminiMode {
-  const offered = (mode: GeminiMode) => !available?.length || available.includes(mode);
+export function antigravityMode(settings: Pick<AntigravitySettings, "permissionMode" | "plan">, available?: readonly string[]): AntigravityMode {
+  const offered = (mode: AntigravityMode) => !available?.length || available.includes(mode);
   if (settings.plan && offered("plan")) return "plan";
-  if (settings.permissionMode === "bypassPermissions" && offered("yolo")) return "yolo";
-  if (settings.permissionMode === "auto" && offered("autoEdit")) return "autoEdit";
+  if ((settings.permissionMode === "bypassPermissions" || settings.permissionMode === "auto") && offered("auto")) return "auto";
   return "default";
 }
 
 /** The chat's permissions and plan mode after the App changed its settings. */
-export function nextPermissions(params: JsonObject, current: Pick<GeminiSettings, "permissionMode" | "plan">): Pick<GeminiSettings, "permissionMode" | "plan"> {
+export function nextPermissions(params: JsonObject, current: Pick<AntigravitySettings, "permissionMode" | "plan">): Pick<AntigravitySettings, "permissionMode" | "plan"> {
   return permissionSettings(params, current);
 }
 
 /** A chat's permissions as the App reads them back. */
-export function appPermissions(settings: Pick<GeminiSettings, "permissionMode" | "cwd">): CodexPermissions {
+export function appPermissions(settings: Pick<AntigravitySettings, "permissionMode" | "cwd">): CodexPermissions {
   return codexPermissions(settings.permissionMode, settings.cwd);
 }
 

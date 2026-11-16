@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { addUsage, applyUpdate, closeTurn, declineTool, NO_USAGE, openTurn, promptUsage, turnRecord, userMessage, type Notification, type TurnState } from "../../src/gemini/turn.js";
+import { addUsage, applyUpdate, closeTurn, commandOutput, declineTool, NO_USAGE, openTurn, promptUsage, turnRecord, userMessage, type Notification, type TurnState } from "../../src/antigravity/turn.js";
 
 const text = (value: string) => ({ type: "text", text: value });
 const fresh = () => openTurn({ threadId: "t", turnId: "turn", cwd: "/work", startedAtMs: 1_000 });
@@ -14,7 +14,7 @@ function fold(state: TurnState, updates: object[], atMs = 2_000): { state: TurnS
 
 const methods = (out: readonly Notification[]) => out.map((notification) => notification.method);
 
-describe("a Gemini turn folded from ACP session updates", () => {
+describe("an Antigravity turn folded from ACP session updates", () => {
   it("streams one agent message from its chunks and leaves the turn it folded untouched", () => {
     const start = fresh();
     const { state, out } = fold(start, [
@@ -64,7 +64,7 @@ describe("a Gemini turn folded from ACP session updates", () => {
     expect(turnRecord(closed.state, "completed", null, 3_000)).toMatchObject({ id: "turn", status: "completed", startedAt: 1, completedAt: 3, durationMs: 2_000, error: null });
   });
 
-  it("maps a tool call by its kind: a read, a search, a file change, or a tool of Gemini's", () => {
+  it("maps a tool call by its kind: a read, a search, a file change, or a tool of the agent's", () => {
     const { state } = fold(fresh(), [
       { sessionUpdate: "tool_call", toolCallId: "r", status: "in_progress", title: "ReadFile a.ts", kind: "read", locations: [{ path: "src/a.ts" }] },
       { sessionUpdate: "tool_call", toolCallId: "s", status: "in_progress", title: "Search 'x'", kind: "search", locations: [] },
@@ -74,7 +74,7 @@ describe("a Gemini turn folded from ACP session updates", () => {
     expect(state.items.map((item) => item.type)).toEqual(["commandExecution", "commandExecution", "dynamicToolCall", "fileChange"]);
     expect(state.items[0]).toMatchObject({ command: "Read src/a.ts", commandActions: [{ type: "read", name: "a.ts", path: "/work/src/a.ts" }] });
     expect(state.items[1]).toMatchObject({ commandActions: [{ type: "search", query: null, path: null }] });
-    expect(state.items[2]).toMatchObject({ namespace: "gemini", tool: "Searching the web", arguments: { query: "x" } });
+    expect(state.items[2]).toMatchObject({ namespace: "antigravity", tool: "Searching the web", arguments: { query: "x" } });
     expect(state.items[3]).toMatchObject({ changes: [{ path: "/work/new.txt", kind: { type: "add" }, diff: "hi\n" }], status: "inProgress" });
   });
 
@@ -114,6 +114,9 @@ describe("a Gemini turn folded from ACP session updates", () => {
     ]);
     const closed = closeTurn(run.state, "interrupted", 3_000);
     expect(closed.state.items.map((item: any) => item.status ?? item.phase)).toEqual(["declined", "failed", null]);
+    // A completed turn's open command was moved to the background: it ran, with no exit code yet.
+    const completed = closeTurn(run.state, "completed", 3_000);
+    expect(completed.state.items[0]).toMatchObject({ status: "completed", exitCode: null, aggregatedOutput: "(still running in the background when the turn ended)" });
     expect(closed.state.tools).toEqual({});
     expect(turnRecord(closed.state, "interrupted", null, 3_000).error).toBeNull();
     expect(turnRecord(closed.state, "failed", "boom", 3_000).error).toEqual({ message: "boom", codexErrorInfo: null, additionalDetails: null });
@@ -142,5 +145,17 @@ describe("a Gemini turn folded from ACP session updates", () => {
     expect(usage).toEqual({ totalTokens: 15, inputTokens: 10, cachedInputTokens: 2, cacheWriteInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 1 });
     expect(promptUsage(undefined)).toEqual(NO_USAGE);
     expect(addUsage(usage, usage).totalTokens).toBe(30);
+  });
+
+  it("reads a command's output and exit code from Antigravity's report of it", () => {
+    const report = "Created At: 2026-11-15T22:01:17-05:00\nCompleted At: 2026-11-15T22:01:17-05:00\nCommand exited with code 2.\n\nCommand output:\nhi\r\nthere\r\n";
+    expect(commandOutput(report, undefined)).toEqual({ output: "hi\nthere\n", exitCode: 2 });
+    expect(commandOutput(report, 0)).toEqual({ output: "hi\nthere\n", exitCode: 0 });
+    expect(commandOutput("plain output", undefined)).toEqual({ output: "plain output", exitCode: null });
+    const { state } = fold(fresh(), [
+      { sessionUpdate: "tool_call", toolCallId: "c", status: "in_progress", title: "echo hi", kind: "execute" },
+      { sessionUpdate: "tool_call_update", toolCallId: "c", status: "completed", rawOutput: { output: report, exit_code: 0 }, content: [{ type: "content", content: text(report) }] },
+    ]);
+    expect(state.items[0]).toMatchObject({ status: "completed", aggregatedOutput: "hi\nthere\n", exitCode: 0 });
   });
 });

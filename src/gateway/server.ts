@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { ClaudeThreads } from "../claude/threads.js";
 import type { Config } from "../config.js";
-import { createGeminiThreads, type GeminiThreads } from "../gemini/threads.js";
-import { SWITCH_UNSUPPORTED } from "../gemini/thread.js";
+import { createAntigravityThreads, type AntigravityThreads } from "../antigravity/threads.js";
+import { SWITCH_UNSUPPORTED } from "../antigravity/thread.js";
 import { Logger, RpcRecorder } from "../log.js";
 import { Meta } from "../meta.js";
 import { invalidRequest, requestedModel, RpcFailure, type JsonObject } from "../protocol/codex.js";
@@ -46,7 +46,7 @@ export class Gateway {
   /** Stock's sections by id (Claude rows name theirs from here); refreshed with each first list page. */
   public readonly sections = new Map<string, JsonObject>();
   public claude!: ClaudeThreads;
-  public gemini!: GeminiThreads<Connection>;
+  public antigravity!: AntigravityThreads<Connection>;
   public stock!: StockClient;
   public catalog!: Catalog;
   public lineages!: Lineages;
@@ -75,8 +75,8 @@ export class Gateway {
     this.stock = await StockClient.connect(this.stockProcess.socketPath);
     this.stock.onFrame = (text) => this.internalFrame(text);
     this.claude = new ClaudeThreads(this.config, this, this.logger);
-    this.gemini = createGeminiThreads<Connection>(this);
-    this.gemini.start();
+    this.antigravity = createAntigravityThreads<Connection>(this);
+    this.antigravity.start();
     this.catalog = new Catalog(this);
     this.lineages = new Lineages(this);
     this.titles = new Titles(this);
@@ -99,7 +99,7 @@ export class Gateway {
     await this.remote.stop();
     for (const request of this.serverRequests.values()) request.reject(new Error("Gateway shutting down."));
     await this.claude.close();
-    this.gemini.close();
+    this.antigravity.close();
     this.stock.close();
     await this.stockProcess.stop();
   }
@@ -183,9 +183,9 @@ export class Gateway {
   public threadHandler(connection: Connection, method: string, params: JsonObject): Handler | undefined {
     const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
     if (method === "thread/start") {
-      if (this.gemini.isGeminiModel(params.model)) {
-        connection.provider = "gemini";
-        return (conn, p) => this.gemini.handle(conn, method, p);
+      if (this.antigravity.isAntigravityModel(params.model)) {
+        connection.provider = "antigravity";
+        return (conn, p) => this.antigravity.handle(conn, method, p);
       }
       if (!this.claude.isClaudeModel(params.model)) return undefined;
       connection.provider = "claude";
@@ -222,8 +222,8 @@ export class Gateway {
   /** The thread's owner: a switched thread's lineage, the Claude layer, or (undefined) stock. */
   private ownerHandler(connection: Connection, method: string, params: JsonObject): Handler | undefined {
     const threadId: string = params.threadId;
-    const gemini = this.geminiHandler(connection, method, params);
-    if (gemini) return gemini;
+    const antigravity = this.antigravityHandler(connection, method, params);
+    if (antigravity) return antigravity;
     if (this.meta.lineage(threadId) || this.lineages.switchRequested(method, params)) {
       return (conn, p) => this.lineages.handle(conn, method, p);
     }
@@ -237,48 +237,49 @@ export class Gateway {
   }
 
   /**
-   * A Gemini chat is the Gemini layer's whole: lineages are Codex's and Claude's, so a chat with messages can't switch
-   * to or from Gemini. A chat without one is the App's new-chat draft, opened before its model is picked: it becomes a
-   * Gemini chat under its own id when a Gemini model is picked for it, and stops being one when another model is.
+   * An Antigravity chat is the Antigravity layer's whole: lineages are Codex's and Claude's, so a chat with messages
+   * can't switch to or from Antigravity. A chat without one is the App's new-chat draft, opened before its model is
+   * picked: it becomes an Antigravity chat under its own id when an Antigravity model is picked for it, and stops being
+   * one when another model is.
    */
-  private geminiHandler(connection: Connection, method: string, params: JsonObject): Handler | undefined {
+  private antigravityHandler(connection: Connection, method: string, params: JsonObject): Handler | undefined {
     const threadId: string = params.threadId;
     const requested = requestedModel(params);
     const picks = (method === "turn/start" || method.endsWith("/settings/update")) && typeof requested === "string" && requested !== "";
-    const toGemini = (): Handler => {
-      connection.provider = "gemini";
-      return (conn, p) => this.gemini.handle(conn, method, p);
+    const toAntigravity = (): Handler => {
+      connection.provider = "antigravity";
+      return (conn, p) => this.antigravity.handle(conn, method, p);
     };
-    if (this.gemini.owns(threadId)) {
-      const draft = this.gemini.draft(threadId);
-      // With messages, the Gemini layer refuses another provider's model itself.
-      if (!picks || this.gemini.isGeminiModel(requested) || !draft) {
+    if (this.antigravity.owns(threadId)) {
+      const draft = this.antigravity.draft(threadId);
+      // With messages, the Antigravity layer refuses another provider's model itself.
+      if (!picks || this.antigravity.isAntigravityModel(requested) || !draft) {
         // Its first message: the Claude draft it was adopted from goes (a stock one has no rollout, and lists nowhere).
         if (method === "turn/start" && draft === "adopted" && this.claude.liveSession(threadId)) void this.claude.discard(threadId).catch(() => undefined);
-        return toGemini();
+        return toAntigravity();
       }
       // The draft's first owner (stock, or Claude) has it still.
       if (draft === "adopted") {
-        this.gemini.release(threadId);
+        this.antigravity.release(threadId);
         return undefined;
       }
-      // Born a Gemini draft, its id is no stock thread's: Claude can take it, as it takes a stock draft.
+      // Born an Antigravity draft, its id is no stock thread's: Claude can take it, as it takes a stock draft.
       if (!this.claude.isClaudeModel(requested)) {
-        return async () => { throw invalidRequest("This new chat was opened as a Gemini chat and can't become a GPT chat: open another new chat with the GPT model picked."); };
+        return async () => { throw invalidRequest("This new chat was opened as an Antigravity chat and can't become a GPT chat: open another new chat with the GPT model picked."); };
       }
-      const settings = this.gemini.release(threadId);
+      const settings = this.antigravity.release(threadId);
       const session = this.claude.create(this.claude.settingsFrom(params, { cwd: settings.cwd, model: null, effort: null, fast: false, permissionMode: settings.permissionMode, plan: settings.plan }), threadId);
       this.emit(threadId, "thread/settings/updated", { threadId, threadSettings: this.claude.threadSettings(session.settings) });
       connection.provider = "claude";
       return (conn, p) => this.claude.handle(conn, method, p);
     }
-    if (!picks || !this.gemini.isGeminiModel(requested)) return undefined;
+    if (!picks || !this.antigravity.isAntigravityModel(requested)) return undefined;
     return async (conn, p) => {
       const cwd = await this.draftDirectory(conn, threadId);
       if (cwd === undefined) throw invalidRequest(SWITCH_UNSUPPORTED);
       this.subscribe(threadId, conn);
-      this.gemini.adopt(threadId, cwd, p);
-      return toGemini()(conn, p);
+      this.antigravity.adopt(threadId, cwd, p);
+      return toAntigravity()(conn, p);
     };
   }
 
@@ -377,7 +378,7 @@ export class Gateway {
         connection.upstream.request("model/list", params),
         params?.cursor ? Promise.resolve([]) : this.claude.models().catch(() => []),
       ]);
-      return { ...stock, data: [...stock.data, ...claude, ...params?.cursor ? [] : this.gemini.models()] };
+      return { ...stock, data: [...stock.data, ...claude, ...params?.cursor ? [] : this.antigravity.models()] };
     });
     // Both providers' skills in every chat, and the status command: Desktop asks per cwd, never per thread. Without
     // cwds (what Desktop mostly sends) stock answers for its own cwd, and so do Claude's.
@@ -392,7 +393,7 @@ export class Gateway {
       };
     });
     on("account/rateLimits/read", async (connection, params) => connection.provider === "claude" ? this.claude.rateLimits()
-      : connection.provider === "gemini" ? this.gemini.rateLimits()
+      : connection.provider === "antigravity" ? this.antigravity.rateLimits()
       : connection.upstream.request("account/rateLimits/read", params));
     on("remoteControl/enable", (_connection, params) => this.remote.enable(params?.ephemeral === true));
     on("remoteControl/disable", (_connection, params) => this.remote.disable(params?.ephemeral === true));
@@ -407,7 +408,7 @@ export class Gateway {
       this.meta.deleteSection(params.sectionId);
       return result;
     });
-    // The App saves the picked model, effort and speed as Codex's defaults. With a Claude or Gemini model they must not reach
+    // The App saves the picked model, effort and speed as Codex's defaults. With a Claude or Antigravity model they must not reach
     // config.toml (plain `codex` and every stock thread without explicit settings would use them): they stay in meta
     // and show in config/read.
     for (const method of ["config/batchWrite", "config/value/write"]) {
@@ -415,7 +416,7 @@ export class Gateway {
         const edits: JsonObject[] = method === "config/batchWrite" ? params.edits : [params];
         const model = edits.find((edit) => edit.keyPath === "model");
         const current = this.meta.claudeDefaults;
-        const claude = model ? this.claude.isClaudeModel(model.value) || this.gemini.isGeminiModel(model.value) : Boolean(current);
+        const claude = model ? this.claude.isClaudeModel(model.value) || this.antigravity.isAntigravityModel(model.value) : Boolean(current);
         const kept = claude ? edits.filter((edit) => CLAUDE_DEFAULT_KEYS.has(edit.keyPath)) : [];
         if (model && !claude && current) this.meta.setClaudeDefaults(null);
         if (!kept.length) return connection.upstream.request(method, params);

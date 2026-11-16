@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Turn } from "../../src/protocol/codex.js";
-import { appendEvents, foldThread, handoff, parseEvents, previewOf, readThread, readThreads, searchThreads, threadPath, type ThreadEvent } from "../../src/gemini/store.js";
+import { appendEvents, foldThread, handoff, parseEvents, previewOf, readThread, readThreads, searchThreads, threadPath, type ThreadEvent } from "../../src/antigravity/store.js";
 
 const turn = (id: string, said: string, answer: string): Turn => ({
   id, itemsView: "full", status: "completed", error: null, startedAt: 10, completedAt: 11, durationMs: 1_000,
@@ -12,19 +12,19 @@ const turn = (id: string, said: string, answer: string): Turn => ({
     { type: "agentMessage", id: `${id}:m0`, text: answer, phase: "final_answer", memoryCitation: null },
   ],
 });
-const created: ThreadEvent = { type: "created", at: 1, cwd: "/work", model: "auto", permissionMode: "default", plan: false };
+const created: ThreadEvent = { type: "created", at: 1, cwd: "/work", model: "gemini-4-carbon", permissionMode: "default", plan: false };
 
-describe("a Gemini chat folded from its log", () => {
+describe("an Antigravity chat folded from its log", () => {
   it("is what its events say, in order", () => {
     const record = foldThread("t", [
       created,
       { type: "turn", at: 11, turn: turn("a", "first question", "first answer"), total: { totalTokens: 15, inputTokens: 10, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 5, reasoningOutputTokens: 0 }, context: { used: 100, size: 1000 } },
       { type: "session", at: 11, sessionId: "s1" },
       { type: "named", at: 12, name: "Named" },
-      { type: "settings", at: 13, model: "gemini-2.5-pro", plan: true },
+      { type: "settings", at: 13, model: "gemini-3.8-flash", effort: "high", plan: true },
       { type: "turn", at: 21, turn: turn("b", "second", "answer two") },
     ])!;
-    expect(record).toMatchObject({ id: "t", cwd: "/work", model: "gemini-2.5-pro", plan: true, permissionMode: "default", name: "Named", sessionId: "s1", createdAt: 1, updatedAt: 21 });
+    expect(record).toMatchObject({ id: "t", cwd: "/work", model: "gemini-3.8-flash", effort: "high", plan: true, permissionMode: "default", name: "Named", sessionId: "s1", createdAt: 1, updatedAt: 21 });
     expect(record.turns.map((entry) => entry.id)).toEqual(["a", "b"]);
     // A turn without its own usage keeps the chat's.
     expect(record.total.totalTokens).toBe(15);
@@ -48,7 +48,7 @@ describe("a Gemini chat folded from its log", () => {
   });
 
   it("reads back from disk what was appended", () => {
-    const directory = join(mkdtempSync(join(tmpdir(), "ccodex-gemini-store-")), "gemini");
+    const directory = join(mkdtempSync(join(tmpdir(), "ccodex-agy-store-")), "antigravity");
     appendEvents(directory, "t", [created]);
     appendEvents(directory, "t", [{ type: "turn", at: 11, turn: turn("a", "hello", "hi") }]);
     appendEvents(directory, "t", []);

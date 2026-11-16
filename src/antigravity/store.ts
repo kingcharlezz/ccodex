@@ -1,7 +1,7 @@
-// A Gemini chat's history as CCodex keeps it: `~/.ccodex/state/gemini/<thread id>.jsonl`, one event a line, only ever
+// An Antigravity chat's history as CCodex keeps it: `~/.ccodex/state/antigravity/<thread id>.jsonl`, one event a line, only ever
 // appended to. The chat is the fold of its events (pure); reading and appending the file are the only IO.
 //
-// The Gemini CLI keeps the model's context in a session of its own. The log names the session that holds all of the
+// The Antigravity CLI keeps the model's context in a session of its own. The log names the session that holds all of the
 // chat's turns; when none does (a fork, an edit that cut the history, a session the CLI lost), the chat's next
 // message opens a new session and brings the history along as a transcript.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
@@ -11,8 +11,8 @@ import type { PermissionChoice } from "./permissions.js";
 import { NO_USAGE } from "./turn.js";
 
 export type ThreadEvent =
-  | { readonly type: "created"; readonly at: number; readonly cwd: string; readonly model: string; readonly permissionMode: PermissionChoice; readonly plan: boolean; readonly forkedFromId?: string | null }
-  | { readonly type: "settings"; readonly at: number; readonly cwd?: string; readonly model?: string; readonly permissionMode?: PermissionChoice; readonly plan?: boolean }
+  | { readonly type: "created"; readonly at: number; readonly cwd: string; readonly model: string; readonly effort?: string | null; readonly permissionMode: PermissionChoice; readonly plan: boolean; readonly forkedFromId?: string | null }
+  | { readonly type: "settings"; readonly at: number; readonly cwd?: string; readonly model?: string; readonly effort?: string | null; readonly permissionMode?: PermissionChoice; readonly plan?: boolean }
   | { readonly type: "named"; readonly at: number; readonly name: string }
   /** The CLI session that holds every turn so far (null: none does). */
   | { readonly type: "session"; readonly at: number; readonly sessionId: string | null }
@@ -24,6 +24,7 @@ export interface ThreadRecord {
   readonly id: string;
   readonly cwd: string;
   readonly model: string;
+  readonly effort: string | null;
   readonly permissionMode: PermissionChoice;
   readonly plan: boolean;
   readonly name: string | null;
@@ -42,7 +43,7 @@ export interface ThreadRecord {
 export function applyEvent(record: ThreadRecord | undefined, id: string, event: ThreadEvent): ThreadRecord | undefined {
   if (event.type === "created") {
     return {
-      id, cwd: event.cwd, model: event.model, permissionMode: event.permissionMode, plan: event.plan, name: null, forkedFromId: event.forkedFromId ?? null,
+      id, cwd: event.cwd, model: event.model, effort: event.effort ?? null, permissionMode: event.permissionMode, plan: event.plan, name: null, forkedFromId: event.forkedFromId ?? null,
       createdAt: event.at, updatedAt: event.at, sessionId: null, turns: [], total: NO_USAGE, context: null,
     };
   }

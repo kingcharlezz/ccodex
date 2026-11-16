@@ -1,5 +1,5 @@
 // Agent Client Protocol (https://agentclientprotocol.com) over a child's stdio: newline-delimited JSON-RPC 2.0, as
-// `gemini --acp` speaks it. Framing and classification are pure; the process is the only IO here.
+// `agy acp` speaks it. Framing and classification are pure; the process is the only IO here.
 import { spawn } from "node:child_process";
 
 export interface AcpError {

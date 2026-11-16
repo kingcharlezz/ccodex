@@ -37,10 +37,10 @@ export interface Config {
   readonly claudeIdleCompactionHoldMs: number;
   /** The tokens of context a Claude chat grows to before Claude compacts it (`claude_auto_compact_window`); unset: Claude's own. */
   readonly claudeAutoCompactWindow?: number;
-  /** `gemini_binary` (or `CCODEX_GEMINI_BINARY`): the Gemini CLI to run; unset: the `gemini` found on the machine. */
-  readonly geminiBinary?: string;
-  /** What the picker's Gemini models start with. */
-  readonly geminiModelPrefix: string;
+  /** `antigravity_binary` (or `CCODEX_ANTIGRAVITY_BINARY`): the Antigravity CLI to run; unset: the `agy` found on the machine. */
+  readonly antigravityBinary?: string;
+  /** What the picker's Antigravity models start with. */
+  readonly antigravityModelPrefix: string;
 }
 
 /** What Claude Code takes as an auto-compact window (its `autoCompactWindow` setting). */
@@ -163,13 +163,13 @@ export function desktopCodex(): string | undefined {
 }
 
 /**
- * The Gemini CLI: the configured one, else the first `gemini` on PATH or where npm and Homebrew put one (the gateway's
- * PATH, set by whatever started it, may lack those). None: CCodex offers no Gemini models.
+ * The Antigravity CLI: the configured one, else the first `agy` on PATH or where its installer and Homebrew put one (the
+ * gateway's PATH, set by whatever started it, may lack those). None: CCodex offers no Antigravity models.
  */
-export function findGemini(config: Pick<Config, "geminiBinary">, path = process.env.PATH ?? ""): string | undefined {
-  if (config.geminiBinary) return config.geminiBinary;
-  const usual = [join(homedir(), ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin", join(homedir(), ".npm-global", "bin")];
-  return [...path.split(delimiter).filter(Boolean), ...usual].map((directory) => join(directory, "gemini")).find((candidate) => existsSync(candidate));
+export function findAntigravity(config: Pick<Config, "antigravityBinary">, path = process.env.PATH ?? ""): string | undefined {
+  if (config.antigravityBinary) return config.antigravityBinary;
+  const usual = [join(homedir(), ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"];
+  return [...path.split(delimiter).filter(Boolean), ...usual].map((directory) => join(directory, "agy")).find((candidate) => existsSync(candidate));
 }
 
 const execFileAsync = promisify(execFile);
@@ -203,7 +203,7 @@ export function loadConfig(): Config {
   const codex = configuredCodex ? resolve(expandHome(configuredCodex)) : findInstalledCodex(home);
   if (!codex) throw new Error("No `codex` found on PATH. Install it with `npm i -g @openai/codex` or set codex_binary in ~/.ccodex/config.toml.");
   const claudeAutoCompactWindow = autoCompactWindow(file.claude_auto_compact_window);
-  const geminiBinary = process.env.CCODEX_GEMINI_BINARY ?? file.gemini_binary as string | undefined;
+  const antigravityBinary = process.env.CCODEX_ANTIGRAVITY_BINARY ?? file.antigravity_binary as string | undefined;
   const renamePrompt = typeof file.rename_prompt === "string" && file.rename_prompt.trim() ? file.rename_prompt.trim() : undefined;
   return {
     codex,
@@ -226,7 +226,7 @@ export function loadConfig(): Config {
     claudeVisualize: file.claude_visualize ?? true,
     claudeIdleCompactionHoldMs: (file.claude_idle_compaction_hold_hours ?? 24) * 3_600_000,
     ...(claudeAutoCompactWindow ? { claudeAutoCompactWindow } : {}),
-    ...(geminiBinary ? { geminiBinary: resolve(expandHome(geminiBinary)) } : {}),
-    geminiModelPrefix: "gemini:",
+    ...(antigravityBinary ? { antigravityBinary: resolve(expandHome(antigravityBinary)) } : {}),
+    antigravityModelPrefix: "antigravity:",
   };
 }

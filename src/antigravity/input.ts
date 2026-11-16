@@ -26,7 +26,7 @@ export async function promptBlocks(input: readonly UserInput[], cwd: string, con
       if (!mimeType) throw invalidParams(`Unsupported image type for '${item.path}'.`);
       blocks.push({ type: "image", mimeType, data: (await read(path)).toString("base64") });
     } else {
-      throw invalidParams("Audio input is not supported in Gemini threads.");
+      throw invalidParams("Audio input is not supported in Antigravity threads.");
     }
   }
   return blocks;

@@ -1,28 +1,29 @@
-// The Gemini side of the gateway: chats run by the Gemini CLI (`gemini --acp`), listed and driven like stock's threads.
+// The Antigravity side of the gateway: chats run by the Antigravity CLI (`agy acp`), listed and driven like stock's threads.
 // A chat is its log (store.ts); the maps here only cache the folded logs and hold the sessions that are open.
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { v7 as uuidv7 } from "uuid";
-import { findGemini, type Config } from "../config.js";
+import { findAntigravity, type Config } from "../config.js";
 import type { Logger } from "../log.js";
 import type { Meta } from "../meta.js";
 import { invalidParams, invalidRequest, type JsonObject, type Thread, type Turn } from "../protocol/codex.js";
 import { historyCursors, occurrencesPage, paginateItems, paginateTurns, turnOccurrences } from "../protocol/turnPagination.js";
 import { toTrash } from "../trash.js";
-import { AUTO_MODEL, GEMINI_PROVIDER, geminiModelLabel, isGeminiModel, listedModels, mapGeminiModel, type GeminiModel } from "./models.js";
-import type { GeminiSettings } from "./permissions.js";
-import { createGeminiSession, geminiSpawn, type GeminiSession } from "./session.js";
+import { ANTIGRAVITY_PROVIDER, antigravityModelLabel, cliModelId, groupModels, isAntigravityModel, mapAntigravityModel, parseModelList, type AntigravityModel, type CliModel } from "./models.js";
+import type { AntigravitySettings } from "./permissions.js";
+import { antigravitySpawn, createAntigravitySession, readText, type AntigravitySession } from "./session.js";
 import { appendEvents, applyEvent, handoff, readThreads, searchThreads, threadPath, type ThreadEvent, type ThreadRecord } from "./store.js";
-import { geminiThread, otherProviderRequested, settingsFrom, settingsOf, settingsResponse, SWITCH_UNSUPPORTED, threadSettings } from "./thread.js";
+import { antigravityThread, otherProviderRequested, settingsFrom, settingsOf, settingsResponse, SWITCH_UNSUPPORTED, threadSettings } from "./thread.js";
 import { usageNotification } from "./turn.js";
 
-/** A client connection, as far as the Gemini layer handles one: it only passes it on. */
+/** A client connection, as far as the Antigravity layer handles one: it only passes it on. */
 type Client = object;
 
-/** What the Gemini layer needs of the gateway (the Gateway itself fits). */
-export interface GeminiHost<C extends Client = Client> {
+/** What the Antigravity layer needs of the gateway (the Gateway itself fits). */
+export interface AntigravityHost<C extends Client = Client> {
   readonly config: Config;
   readonly logger: Logger;
   readonly meta: Pick<Meta, "isArchived" | "setArchived" | "section" | "forget" | "entries">;
@@ -37,10 +38,10 @@ export interface GeminiHost<C extends Client = Client> {
   cancelServerRequests(threadId: string): void;
 }
 
-export interface GeminiThreads<C extends Client = Client> {
-  /** The Gemini CLI is on this machine. */
+export interface AntigravityThreads<C extends Client = Client> {
+  /** The Antigravity CLI is on this machine. */
   available(): boolean;
-  isGeminiModel(model: unknown): boolean;
+  isAntigravityModel(model: unknown): boolean;
   owns(threadId: string): boolean;
   loadedIds(): string[];
   /** Every chat as a list row. */
@@ -52,17 +53,17 @@ export interface GeminiThreads<C extends Client = Client> {
   /** A chat for the `/cc` status card. */
   state(threadId: string): JsonObject;
   /**
-   * A chat nothing was said in yet is the App's new-chat draft, whose model the user may still change: `born` a Gemini
+   * A chat nothing was said in yet is the App's new-chat draft, whose model the user may still change: `born` an Antigravity
    * chat, or `adopted` from the provider that started it. Undefined for any other chat.
    */
   draft(threadId: string): "born" | "adopted" | undefined;
   /**
-   * Another provider's draft becomes a Gemini chat under its own id (the App opens a new chat before its model is
-   * picked). The draft stays where it was, behind the Gemini chat, until a message is sent.
+   * Another provider's draft becomes an Antigravity chat under its own id (the App opens a new chat before its model is
+   * picked). The draft stays where it was, behind the Antigravity chat, until a message is sent.
    */
   adopt(threadId: string, cwd: string, params: JsonObject): void;
-  /** A draft stops being a Gemini chat (another provider's model was picked for it); its settings as it was one. */
-  release(threadId: string): GeminiSettings;
+  /** A draft stops being an Antigravity chat (another provider's model was picked for it); its settings as it was one. */
+  release(threadId: string): AntigravitySettings;
   handle(connection: C, method: string, params: JsonObject): Promise<unknown>;
   start(): void;
   close(): void;
@@ -70,44 +71,63 @@ export interface GeminiThreads<C extends Client = Client> {
 
 /** As stock unloads a quiet thread: a chat's CLI process closes after this long without a turn. */
 const IDLE_MS = Number(process.env.CCODEX_E2E_IDLE_MS) || 30 * 60_000;
-/** Gemini CLI processes kept at most; the chat used longest ago gives its up first. */
+/** Antigravity CLI processes kept at most; the chat used longest ago gives its up first. */
 const MAX_PROCESSES = Number(process.env.CCODEX_E2E_MAX_PROCESSES) || 10;
 const BINARY_CACHE_MS = 30_000;
 
 const seconds = (ms: number) => Math.floor(ms / 1000);
 
-export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: () => number = Date.now): GeminiThreads<C> {
+export function createAntigravityThreads<C extends Client>(host: AntigravityHost<C>, now: () => number = Date.now): AntigravityThreads<C> {
   const { config, logger } = host;
-  const prefix = config.geminiModelPrefix;
-  const directory = join(config.dataDir, "gemini");
-  const modelsPath = join(config.dataDir, "gemini-models.json");
+  const prefix = config.antigravityModelPrefix;
+  const directory = join(config.dataDir, "antigravity");
+  const modelsPath = join(config.dataDir, "antigravity-models.json");
   /** The chats, folded from their logs. */
   const records = new Map<string, ThreadRecord>();
   /** Events of chats nothing was said in yet: written with their first turn, as stock writes a rollout. */
   const unwritten = new Map<string, ThreadEvent[]>();
   /** Side chats: never written, never listed. */
   const ephemeral = new Set<string>();
-  /** Drafts another provider started, taken over when a Gemini model was picked for them. */
+  /** Drafts another provider started, taken over when an Antigravity model was picked for them. */
   const adopted = new Set<string>();
-  const sessions = new Map<string, GeminiSession>();
-  let knownModels: readonly GeminiModel[] | undefined;
+  const sessions = new Map<string, AntigravitySession>();
+  /** The CLI's models, as it last listed them (`agy models`, or a session's). */
+  let cliModels: readonly CliModel[] = [];
+  let models: readonly AntigravityModel[] = [];
   let binary: { at: number; path: string | undefined } | undefined;
   let sweeper: NodeJS.Timeout | undefined;
 
   // ---- the CLI and its models ----
 
-  const geminiBinary = (): string | undefined => {
-    if (!binary || now() - binary.at > BINARY_CACHE_MS) binary = { at: now(), path: findGemini(config) };
+  const antigravityBinary = (): string | undefined => {
+    if (!binary || now() - binary.at > BINARY_CACHE_MS) binary = { at: now(), path: findAntigravity(config) };
     return binary.path;
   };
 
-  const onModels = (models: readonly GeminiModel[]): void => {
-    if (JSON.stringify(models) === JSON.stringify(knownModels)) return;
-    knownModels = models;
-    const temporary = `${modelsPath}.${process.pid}.tmp`;
-    void writeFile(temporary, JSON.stringify({ models }), { mode: 0o600 }).then(() => rename(temporary, modelsPath))
-      .catch((error: unknown) => logger.warn("gemini.models.unsaved", { error: String(error) }));
+  const useModels = (listed: readonly CliModel[]): void => {
+    cliModels = listed;
+    models = groupModels(listed);
   };
+
+  /** A new list of the CLI's models: used, and kept for the next start. */
+  const onModels = (listed: readonly CliModel[]): void => {
+    if (!listed.length || JSON.stringify(listed) === JSON.stringify(cliModels)) return;
+    useModels(listed);
+    const temporary = `${modelsPath}.${process.pid}.tmp`;
+    void writeFile(temporary, JSON.stringify({ models: listed }), { mode: 0o600 }).then(() => rename(temporary, modelsPath))
+      .catch((error: unknown) => logger.warn("antigravity.models.unsaved", { error: String(error) }));
+  };
+
+  /** `agy models` (no session is opened for it). */
+  const listModels = (agy: string): void => {
+    execFile(agy, ["models"], { timeout: 60_000, env: { ...process.env, CCODEX_SHIM_ACTIVE: undefined } }, (error, stdout) => {
+      if (error) return void logger.warn("antigravity.models.unavailable", { error: String(error) });
+      onModels(parseModelList(stdout));
+    });
+  };
+
+  /** The model a new chat starts on when the request names none: the CLI's first. */
+  const defaultModel = (): string => models[0]?.id ?? "gemini-4-carbon";
 
   // ---- the chats ----
 
@@ -127,13 +147,15 @@ export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: 
     appendEvents(directory, threadId, [...held ?? [], ...events]);
   };
 
-  const session = (threadId: string): GeminiSession => {
+  const session = (threadId: string): AntigravitySession => {
     const open = sessions.get(threadId);
     if (open) return open;
     recordOf(threadId);
-    const created = createGeminiSession({
+    const created = createAntigravitySession({
       threadId, logger, now,
-      spawn: (cwd) => geminiSpawn(geminiBinary() ?? "gemini", cwd),
+      spawn: (cwd) => antigravitySpawn(antigravityBinary() ?? "agy", cwd),
+      cliModel: (record) => cliModelId(models, record.model, record.effort),
+      read: readText,
       record: () => recordOf(threadId),
       append: (events) => append(threadId, events),
       emit: (method, params) => host.emit(threadId, method, params),
@@ -153,7 +175,7 @@ export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: 
 
   /** The row with what meta.json keeps of it: its section and archive flag. */
   const row = (record: ThreadRecord): Thread => {
-    const thread = geminiThread(record, prefix, { status: status(record.id), ephemeral: ephemeral.has(record.id) });
+    const thread = antigravityThread(record, prefix, { status: status(record.id), ephemeral: ephemeral.has(record.id) });
     const section = host.meta.section(record.id);
     return {
       ...thread,
@@ -191,8 +213,8 @@ export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: 
   // ---- requests ----
 
   /** A chat with nothing said in it, under a new id or a draft's. */
-  const create = (threadId: string, cwd: string, params: JsonObject): GeminiSettings => {
-    const settings = settingsFrom(params, { cwd: params.cwd ?? cwd, model: AUTO_MODEL, permissionMode: "default", plan: false }, prefix);
+  const create = (threadId: string, cwd: string, params: JsonObject): AntigravitySettings => {
+    const settings = settingsFrom(params, { cwd: params.cwd ?? cwd, model: defaultModel(), effort: null, permissionMode: "default", plan: false }, prefix);
     unwritten.set(threadId, []);
     append(threadId, [{ type: "created", at: seconds(now()), ...settings }]);
     session(threadId);
@@ -326,7 +348,7 @@ export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: 
         if (!entry) throw invalidRequest("nothing queued");
         if (open.busy) {
           open.queued.unshift(entry);
-          throw invalidRequest("A Gemini turn is running: the message runs when it ends.");
+          throw invalidRequest("An Antigravity turn is running: the message runs when it ends.");
         }
         changed();
         return { turn: await open.startTurn({ input: entry.input, clientUserMessageId: entry.clientUserMessageId }) };
@@ -355,7 +377,7 @@ export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: 
         return { turn: await session(threadId).startTurn(params) };
       }
       // ACP has no way to hand the model a message mid-turn.
-      case "turn/steer": throw invalidRequest("Gemini takes no message while its turn runs: queue it, or stop the turn first.");
+      case "turn/steer": throw invalidRequest("Antigravity takes no message while its turn runs: queue it, or stop the turn first.");
       case "turn/interrupt": {
         sessions.get(threadId)?.interrupt();
         return {};
@@ -420,13 +442,13 @@ export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: 
       case "thread/queue/update":
       case "thread/queue/reorder":
       case "thread/queue/start": return queue(threadId, method, params);
-      case "thread/goal/set": throw invalidRequest("Goals are not supported in Gemini threads.");
-      case "thread/compact/start": throw invalidRequest("/compact is not supported in Gemini threads: the Gemini CLI compresses a long chat itself.");
+      case "thread/goal/set": throw invalidRequest("Goals are not supported in Antigravity threads.");
+      case "thread/compact/start": throw invalidRequest("/compact is not supported in Antigravity threads: the Antigravity CLI compresses a long chat itself.");
       case "review/start":
       case "thread/shellCommand":
-        throw invalidRequest(`${method === "review/start" ? "/review" : "!command"} is not supported in Gemini threads.`);
+        throw invalidRequest(`${method === "review/start" ? "/review" : "!command"} is not supported in Antigravity threads.`);
       default:
-        throw invalidRequest(`${method} is not supported in Gemini threads.`);
+        throw invalidRequest(`${method} is not supported in Antigravity threads.`);
     }
   };
 
@@ -450,25 +472,25 @@ export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: 
   };
 
   return {
-    available: () => geminiBinary() !== undefined,
-    isGeminiModel: (model) => isGeminiModel(model, prefix),
+    available: () => antigravityBinary() !== undefined,
+    isAntigravityModel: (model) => isAntigravityModel(model, prefix),
     owns: (threadId) => records.has(threadId),
     loadedIds: () => [...sessions.keys()].filter((threadId) => !ephemeral.has(threadId)),
     // A chat nothing was said in is no row yet, as stock's.
     threads: () => [...records.values()].filter((record) => !ephemeral.has(record.id) && (record.turns.length > 0 || sessions.get(record.id)?.busy)).map(row),
-    models: () => geminiBinary() ? listedModels(knownModels).map((model) => mapGeminiModel(model, prefix)) : [],
+    models: () => antigravityBinary() ? models.map((model) => mapAntigravityModel(model, prefix)) : [],
     search: (term) => searchThreads([...records.values()].filter((record) => !ephemeral.has(record.id)), term),
     rename,
     rateLimits: () => {
-      // The Gemini CLI reports no plan limits over ACP.
-      const snapshot = { limitId: GEMINI_PROVIDER, limitName: "Gemini", primary: null, secondary: null, credits: null, planType: null, rateLimitReachedType: null };
-      return { rateLimits: snapshot, rateLimitsByLimitId: { [GEMINI_PROVIDER]: snapshot } };
+      // The Antigravity CLI reports no plan limits over ACP.
+      const snapshot = { limitId: ANTIGRAVITY_PROVIDER, limitName: "Antigravity", primary: null, secondary: null, credits: null, planType: null, rateLimitReachedType: null };
+      return { rateLimits: snapshot, rateLimitsByLimitId: { [ANTIGRAVITY_PROVIDER]: snapshot } };
     },
     state: (threadId) => {
       const record = recordOf(threadId);
       const open = sessions.get(threadId);
       return {
-        model: geminiModelLabel(record.model), permissionMode: record.permissionMode, plan: record.plan, cwd: record.cwd,
+        model: antigravityModelLabel(record.model, models), effort: record.effort, permissionMode: record.permissionMode, plan: record.plan, cwd: record.cwd,
         loaded: open !== undefined, process: open?.loaded ?? false, turnId: open?.liveTurn()?.id ?? null, context: record.context,
       };
     },
@@ -476,7 +498,7 @@ export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: 
     adopt: (threadId, cwd, params) => {
       const settings = create(threadId, cwd, params);
       adopted.add(threadId);
-      // Stock reports a thread's settings only when they change: the chat is on a Gemini model from here.
+      // Stock reports a thread's settings only when they change: the chat is on an Antigravity model from here.
       host.emit(threadId, "thread/settings/updated", { threadId, threadSettings: threadSettings(settings, prefix) });
     },
     release: (threadId) => {
@@ -493,10 +515,12 @@ export function createGeminiThreads<C extends Client>(host: GeminiHost<C>, now: 
     start: () => {
       for (const record of readThreads(directory)) records.set(record.id, record);
       try {
-        knownModels = (JSON.parse(readFileSync(modelsPath, "utf8")) as { models: GeminiModel[] }).models;
+        useModels((JSON.parse(readFileSync(modelsPath, "utf8")) as { models: CliModel[] }).models);
       } catch {
-        // No list kept yet: the picker shows the models every login has.
+        // No list kept yet: the CLI's, once it answers.
       }
+      const agy = antigravityBinary();
+      if (agy) listModels(agy);
       sweeper = setInterval(sweep, Math.min(60_000, IDLE_MS / 4));
       sweeper.unref();
     },

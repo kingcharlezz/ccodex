@@ -45,9 +45,9 @@ Then quit and reopen the ChatGPT desktop app.
 - **One history with the `claude` CLI.** A chat from the App opens with
   `claude --resume`, and your CLI sessions show up in the App.
 - **`/cc`** shows the chat's model, context use and your Claude and Codex limits.
-- **Gemini too.** With the [Gemini CLI](https://github.com/google-gemini/gemini-cli)
-  installed, its models are in the picker as well, and Gemini chats run on it with your
-  Google login ([what works](docs/details.md#gemini-chats)).
+- **Gemini too.** With Google's [Antigravity CLI](https://antigravity.google/docs/cli/acp/)
+  installed, its models (Gemini, and the others it serves) are in the picker as well, and
+  those chats run on it with your Google login ([what works](docs/details.md#antigravity-chats)).
 
 ## How it works
 
@@ -67,8 +67,8 @@ The installer adds Codex if it's missing, and Claude Code comes with CCodex.
    `npm install -g @gkorepanov/ccodex && ccodex setup`. Run it as your normal user, not
    with `sudo`.
 2. **Log in** to whatever you aren't logged in to yet: `ccodex auth codex`,
-   `ccodex auth claude`. For Gemini models (optional): `npm i -g @google/gemini-cli`,
-   then `ccodex auth gemini`.
+   `ccodex auth claude`. For Gemini models through Antigravity (optional):
+   `curl -fsSL https://antigravity.google/cli/install.sh | bash`, then `ccodex auth antigravity`.
 3. **Restart.** Open a new shell and run `codex app-server daemon restart`. Then:
    - app connected over SSH: reconnect to the server;
    - local app on a Mac: quit it with ⌘Q and open it again;

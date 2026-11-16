@@ -1,4 +1,4 @@
-// A running Gemini turn as the App sees it: each ACP `session/update` folds into the turn's items and yields the Codex
+// A running Antigravity turn as the App sees it: each ACP `session/update` folds into the turn's items and yields the Codex
 // notifications that show it. All pure: a step takes the turn so far and returns the next one with what to send.
 import { basename, isAbsolute, resolve } from "node:path";
 import type { CommandAction, FileUpdateChange, JsonObject, ThreadItem, TokenUsageBreakdown, Turn, TurnStatus, UserInput } from "../protocol/codex.js";
@@ -138,6 +138,18 @@ interface ToolCall {
   readonly content?: readonly JsonObject[] | null;
   readonly locations?: ReadonlyArray<{ path?: string }> | null;
   readonly rawInput?: unknown;
+  readonly rawOutput?: { readonly output?: unknown; readonly exit_code?: unknown } | null;
+}
+
+/**
+ * A command's output and exit code. The Antigravity CLI reports a command as a header (`Created At: …`, `Command exited
+ * with code N.`) before `Command output:`; the App shows only what the command wrote.
+ */
+export function commandOutput(text: string, exitCode: unknown): { readonly output: string; readonly exitCode: number | null } {
+  const marker = text.indexOf("Command output:\n");
+  const output = (marker >= 0 ? text.slice(marker + "Command output:\n".length) : text).replace(/\r\n/gu, "\n");
+  const said = /Command exited with code (-?\d+)/u.exec(marker >= 0 ? text.slice(0, marker) : "");
+  return { output, exitCode: typeof exitCode === "number" ? exitCode : said ? Number(said[1]) : null };
 }
 
 const absolute = (path: string, cwd: string) => isAbsolute(path) ? path : resolve(cwd, path);
@@ -163,7 +175,7 @@ function fileChanges(content: ToolCall["content"], cwd: string): FileUpdateChang
 
 const FILE_KINDS = new Set(["edit", "delete", "move"]);
 
-/** A tool call as the item the App has for its kind: a command, a file change, or a tool call of Gemini's. */
+/** A tool call as the item the App has for its kind: a command, a file change, or a tool call of the agent's. */
 function toolItem(call: ToolCall, cwd: string): ThreadItem {
   const title = call.title?.trim() || call.kind || "tool";
   const changes = fileChanges(call.content, cwd);
@@ -180,7 +192,7 @@ function toolItem(call: ToolCall, cwd: string): ThreadItem {
   }
   if (call.kind === "search") return command(title, [{ type: "search", command: title, query: null, path: location ? absolute(location, cwd) : null }]);
   return {
-    type: "dynamicToolCall", id: call.toolCallId, namespace: "gemini", tool: title,
+    type: "dynamicToolCall", id: call.toolCallId, namespace: "antigravity", tool: title,
     arguments: call.rawInput && typeof call.rawInput === "object" ? call.rawInput : {}, status: "inProgress", contentItems: null, success: null, durationMs: null,
   };
 }
@@ -190,11 +202,13 @@ function endedTool(item: ThreadItem, call: ToolCall, cwd: string, declined: bool
   const failed = call.status === "failed";
   const output = contentText(call.content);
   if (item.type === "commandExecution") {
-    return { ...item, status: declined ? "declined" : failed ? "failed" : "completed", aggregatedOutput: output, exitCode: failed ? 1 : 0, durationMs };
+    const ran = commandOutput(output || (typeof call.rawOutput?.output === "string" ? call.rawOutput.output : ""), call.rawOutput?.exit_code);
+    return { ...item, status: declined ? "declined" : failed ? "failed" : "completed", aggregatedOutput: ran.output, exitCode: ran.exitCode ?? (failed ? 1 : 0), durationMs };
   }
   if (item.type === "fileChange") {
-    const changes = fileChanges(call.content, cwd);
-    return { ...item, changes: changes.length ? changes : item.changes, status: declined ? "declined" : failed ? "failed" : "completed" };
+    // The patch shown with the approval stays: once applied, a write no longer tells what it replaced.
+    const changes = item.changes.length ? item.changes : fileChanges(call.content, cwd);
+    return { ...item, changes, status: declined ? "declined" : failed ? "failed" : "completed" };
   }
   if (item.type === "dynamicToolCall") {
     return { ...item, status: failed ? "failed" : "completed", success: !failed, durationMs, contentItems: output ? [{ type: "inputText", text: output }] : [] };
@@ -297,7 +311,11 @@ export function applyUpdate(state: TurnState, update: JsonObject, atMs: number, 
   }
 }
 
-/** The turn ends: what still streams completes (the last message as the answer of a turn that completed), and the tool calls still open end with it. */
+/**
+ * The turn ends: what still streams completes (the last message as the answer of a turn that completed), and the tool
+ * calls still open end with it. A command still open when the turn completed was moved to the background by the agent
+ * (it does so with a long one): it shows as having run, with no exit code yet.
+ */
 export function closeTurn(state: TurnState, status: Exclude<TurnStatus, "inProgress">, atMs: number): Step {
   return chain(state,
     (current) => closeMessage(current, status === "completed" ? "final_answer" : null, atMs),
@@ -305,8 +323,10 @@ export function closeTurn(state: TurnState, status: Exclude<TurnStatus, "inProgr
     (current) => Object.keys(current.tools).reduce<Step>((done, id) => {
       const item = itemOf(done.state, id);
       if (!item) return done;
-      // A stopped turn's command or file change was declined, as stock shows it; another tool call has no such status.
-      const ended = { ...item, status: status === "interrupted" && item.type !== "dynamicToolCall" ? "declined" : "failed" } as ThreadItem;
+      const ended = (status === "completed" && item.type === "commandExecution"
+        ? { ...item, status: "completed", exitCode: null, aggregatedOutput: item.aggregatedOutput ?? "(still running in the background when the turn ended)" }
+        // A stopped turn's command or file change was declined, as stock shows it; another tool call has no such status.
+        : { ...item, status: status === "interrupted" && item.type !== "dynamicToolCall" ? "declined" : "failed" }) as ThreadItem;
       return { state: withItem(done.state, ended), out: [...done.out, completed(done.state, ended, atMs)] };
     }, step({ ...current, tools: {} })),
   );
@@ -317,7 +337,7 @@ export function turnRecord(state: TurnState, status: TurnStatus, error: string |
   const done = status !== "inProgress";
   return {
     id: state.turnId, items: [...state.items], itemsView: "full", status,
-    error: status === "failed" ? { message: error ?? "Gemini turn failed.", codexErrorInfo: null, additionalDetails: null } : null,
+    error: status === "failed" ? { message: error ?? "Antigravity turn failed.", codexErrorInfo: null, additionalDetails: null } : null,
     startedAt: Math.floor(state.startedAtMs / 1000), completedAt: done ? Math.floor(atMs / 1000) : null, durationMs: done ? Math.max(0, atMs - state.startedAtMs) : null,
   };
 }

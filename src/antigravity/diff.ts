@@ -68,3 +68,25 @@ export function unifiedDiff(before: string, after: string, context = 3): string 
     return [`@@ -${oldCount ? oldStart + 1 : oldStart},${oldCount} +${newCount ? newStart + 1 : newStart},${newCount} @@`, ...hunk.map((op) => `${op.kind}${op.line}`)].join("\n");
   }).join("\n");
 }
+
+/** What a file holds now; undefined when there is no such file. */
+export type ReadText = (path: string) => string | undefined;
+
+/**
+ * An agent's proposed file changes as whole-file texts, so their patch shows where they land. The Antigravity CLI asks
+ * about an edit with only the replaced snippet (`oldText` "two", `newText` "2") and about a write with only the new
+ * text: an edit whose snippet is in the file once becomes the file before and after, and a write over an existing file
+ * gets that file as its old text. What can't be placed is left as it is.
+ */
+export function expandDiffs<T extends Record<string, any>>(content: readonly T[], read: ReadText): T[] {
+  return content.map((entry) => {
+    if (entry.type !== "diff" || typeof entry.path !== "string" || typeof entry.newText !== "string") return entry;
+    const current = read(entry.path);
+    if (current === undefined) return entry;
+    const old = entry.oldText;
+    if (typeof old !== "string") return { ...entry, oldText: current, _meta: { ...entry._meta, kind: "modify" } };
+    const at = old ? current.indexOf(old) : -1;
+    if (at < 0 || current === old || current.indexOf(old, at + old.length) >= 0) return entry;
+    return { ...entry, oldText: current, newText: `${current.slice(0, at)}${entry.newText}${current.slice(at + old.length)}`, _meta: { ...entry._meta, kind: "modify" } };
+  });
+}

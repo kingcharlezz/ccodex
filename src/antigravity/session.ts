@@ -1,15 +1,16 @@
-// A Gemini chat while it is open: its `gemini --acp` process, the CLI session in it, and the turn that runs. What a
+// An Antigravity chat while it is open: its `agy acp` process, the CLI session in it, and the turn that runs. What a
 // turn shows is folded by turn.ts and what the chat keeps is the log of store.ts; held here is only what lives no longer
 // than the process: its handle, the running turn, the queue.
 import { randomUUID } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import type { Logger } from "../log.js";
 import { invalidRequest, type JsonObject, type QueuedSubmissionLike, type TokenUsageBreakdown, type Turn, type TurnStatus, type UserInput } from "../protocol/codex.js";
 import { startedTurn } from "../protocol/turnPagination.js";
 import { AcpFailure, startAcp, type AcpConnection, type AcpSpawn } from "./acp.js";
+import { expandDiffs, type ReadText } from "./diff.js";
 import { promptBlocks } from "./input.js";
-import type { GeminiModel } from "./models.js";
-import { approvalRequest, geminiMode, permissionOutcome, unaskedDecision, type PermissionOption } from "./permissions.js";
+import type { CliModel } from "./models.js";
+import { approvalRequest, antigravityMode, permissionOutcome, unaskedDecision, type PermissionOption } from "./permissions.js";
 import { handoff, type ThreadEvent, type ThreadRecord } from "./store.js";
 import { addUsage, applyUpdate, closeTurn, declineTool, NO_USAGE, openTurn, promptUsage, turnRecord, userMessage, type Notification, type TurnState } from "./turn.js";
 
@@ -19,7 +20,17 @@ const METHOD_NOT_FOUND = -32601;
 /** How long a stopped turn waits for the CLI to end its prompt before its process is closed. */
 const CANCEL_WAIT_MS = 5_000;
 
-export const NOT_SIGNED_IN = "Gemini CLI is not signed in. Run `ccodex auth gemini` (or `gemini`) in a terminal and sign in with Google, or set GEMINI_API_KEY, then send the message again.";
+export const NOT_SIGNED_IN = "Antigravity CLI is not signed in. Run `ccodex auth antigravity` (or `agy acp --login`) in a terminal and sign in with Google, then send the message again.";
+const INSTALL = "curl -fsSL https://antigravity.google/cli/install.sh | bash";
+
+/** A file's text as it is now, for the patch of a change the agent asks about. */
+export const readText: ReadText = (path) => {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+};
 
 /** What the session needs of the world around it: all of it passed in. */
 export interface SessionHost {
@@ -35,8 +46,12 @@ export interface SessionHost {
   /** A question to those clients (an approval); rejects when cancelled. */
   ask(method: string, params: unknown): Promise<any>;
   cancelAsks(): void;
+  /** The CLI's id of the chat's model at its effort. */
+  cliModel(record: ThreadRecord): string;
   /** The models the CLI offers this login. */
-  onModels(models: readonly GeminiModel[]): void;
+  onModels(models: readonly CliModel[]): void;
+  /** What a file holds now (undefined: no such file). */
+  read: ReadText;
   onTurnCompleted(turnId: string): void;
   now(): number;
 }
@@ -57,7 +72,7 @@ interface RunningTurn {
   cancelTimer?: NodeJS.Timeout;
 }
 
-export interface GeminiSession {
+export interface AntigravitySession {
   readonly busy: boolean;
   /** Its CLI process runs. */
   readonly loaded: boolean;
@@ -75,32 +90,28 @@ export interface GeminiSession {
   close(): void;
 }
 
-/** A `#!/usr/bin/env node` script runs on this process's Node: the gateway's PATH may have none (Desktop starts it). */
-export function geminiSpawn(binary: string, cwd: string, env: Record<string, string | undefined> = process.env): AcpSpawn {
+/** `agy acp`: the Antigravity CLI's ACP server over stdio, in the chat's directory. */
+export function antigravitySpawn(binary: string, cwd: string, env: Record<string, string | undefined> = process.env): AcpSpawn {
   const { CCODEX_SHIM_ACTIVE: _shim, ...rest } = env;
-  let script = false;
-  try {
-    script = /^#!.*\bnode\b/u.test(readFileSync(realpathSync(binary), "utf8").slice(0, 200));
-  } catch {
-    // Not a readable file (a bare command name): the system finds and runs it.
-  }
-  return script ? { command: process.execPath, args: [realpathSync(binary), "--acp"], cwd, env: rest } : { command: binary, args: ["--acp"], cwd, env: rest };
+  return { command: binary, args: ["acp"], cwd, env: rest };
 }
 
 /** Why a turn failed, as the chat says it. */
 export function failureText(error: unknown): string {
   if (error instanceof AcpFailure && error.code === AUTH_REQUIRED) return `${NOT_SIGNED_IN} (${error.message})`;
   const message = error instanceof Error ? error.message : String(error);
-  return /ENOENT|could not start/u.test(message) ? `Gemini CLI did not start: ${message}. Install it with \`npm i -g @google/gemini-cli\` or set gemini_binary in ~/.ccodex/config.toml.` : `Gemini: ${message}`;
+  return /ENOENT|could not start/u.test(message) ? `Antigravity CLI did not start: ${message}. Install it with \`${INSTALL}\` or set antigravity_binary in ~/.ccodex/config.toml.` : `Antigravity: ${message}`;
 }
 
-export function createGeminiSession(host: SessionHost): GeminiSession {
+export function createAntigravitySession(host: SessionHost): AntigravitySession {
   const { threadId } = host;
   let acp: AcpConnection | undefined;
   let opening: Promise<Opened> | undefined;
   let turn: RunningTurn | undefined;
   /** A prompt is with the CLI: its session updates are the turn's (a loaded session replays its history first). */
   let prompting = false;
+  /** User messages a session load replayed: none, for a chat with history, and the CLI had lost the session. */
+  let replayed = 0;
   let activeAt = host.now();
   const queued: QueuedSubmissionLike[] = [];
   const injected: string[] = [];
@@ -116,7 +127,12 @@ export function createGeminiSession(host: SessionHost): GeminiSession {
   };
 
   const onNotification = (source: AcpConnection) => (method: string, params: any) => {
-    if (source !== acp || method !== "session/update" || !prompting || !turn || turn.interrupted) return;
+    if (source !== acp || method !== "session/update") return;
+    if (!prompting) {
+      if (params.update?.sessionUpdate === "user_message_chunk") replayed += 1;
+      return;
+    }
+    if (!turn || turn.interrupted) return;
     activeAt = host.now();
     const next = applyUpdate(turn.state, params.update ?? {}, host.now(), host.record().total);
     turn.state = next.state;
@@ -131,12 +147,12 @@ export function createGeminiSession(host: SessionHost): GeminiSession {
     const call: JsonObject = params.toolCall ?? {};
     const itemId = String(call.toolCallId ?? "");
     const options: PermissionOption[] = Array.isArray(params.options) ? params.options : [];
-    // The CLI tells a call before it asks; one it did not tell shows from the request.
-    if (!running.state.items.some((item) => item.id === itemId)) {
-      const shown = applyUpdate(running.state, { ...call, sessionUpdate: "tool_call", status: "pending" }, host.now());
-      running.state = shown.state;
-      send(shown.out);
-    }
+    // The request carries the change's patch (a snippet, made whole here); a call the CLI did not tell shows from it.
+    const known = running.state.items.some((item) => item.id === itemId);
+    const content = Array.isArray(call.content) ? expandDiffs(call.content as JsonObject[], host.read) : call.content;
+    const shown = applyUpdate(running.state, { ...call, content, sessionUpdate: known ? "tool_call_update" : "tool_call", status: "pending" }, host.now());
+    running.state = shown.state;
+    send(shown.out);
     const record = host.record();
     // In plan mode the turn ends with the plan: the App's own control leaves plan mode, not the model.
     let decision: unknown = record.plan && call.kind === "switch_mode" ? "decline" : unaskedDecision(record.permissionMode);
@@ -160,7 +176,7 @@ export function createGeminiSession(host: SessionHost): GeminiSession {
       onNotification: (method, params) => onNotification(connection)(method, params),
       onRequest: (method, params) => onRequest(connection)(method, params),
       onExit: (reason) => {
-        host.logger.info("gemini.process.exited", { threadId, reason });
+        host.logger.info("antigravity.process.exited", { threadId, reason });
         if (acp === connection) closeProcess();
       },
     });
@@ -180,12 +196,19 @@ export function createGeminiSession(host: SessionHost): GeminiSession {
     };
     if (record.sessionId) {
       try {
-        return opened(await connection.request("session/load", { sessionId: record.sessionId, cwd: record.cwd, mcpServers: [] }) ?? {}, record.sessionId, false);
+        replayed = 0;
+        const loaded = opened(await connection.request("session/load", { sessionId: record.sessionId, cwd: record.cwd, mcpServers: [] }) ?? {}, record.sessionId, false);
+        // The Antigravity CLI opens an empty session for an id it doesn't have: what it replays tells.
+        if (record.turns.length && !replayed) {
+          host.logger.warn("antigravity.session.lost", { threadId, sessionId: record.sessionId, error: "no history replayed" });
+          return { ...loaded, fresh: true };
+        }
+        return loaded;
       } catch (error) {
         if (error instanceof AcpFailure && error.code === AUTH_REQUIRED) throw error;
         if (acp !== connection) throw error;
         // The CLI no longer has the session (its files are gone, the chat moved to another directory).
-        host.logger.warn("gemini.session.lost", { threadId, sessionId: record.sessionId, error: String(error) });
+        host.logger.warn("antigravity.session.lost", { threadId, sessionId: record.sessionId, error: String(error) });
       }
     }
     const created: JsonObject = await connection.request("session/new", { cwd: record.cwd, mcpServers: [] });
@@ -205,16 +228,17 @@ export function createGeminiSession(host: SessionHost): GeminiSession {
     const record = host.record();
     const connection = acp;
     if (!connection) return;
-    const mode = geminiMode(record, session.modes);
+    const mode = antigravityMode(record, session.modes);
     if (mode !== session.mode) {
       await connection.request("session/set_mode", { sessionId: session.sessionId, modeId: mode });
       session.mode = mode;
     }
-    if (record.model !== session.model) {
+    const model = host.cliModel(record);
+    if (model !== session.model) {
       // A CLI without model switching keeps its own model.
-      await connection.request("session/set_model", { sessionId: session.sessionId, modelId: record.model })
+      await connection.request("session/set_model", { sessionId: session.sessionId, modelId: model })
         .catch((error: unknown) => { if (!(error instanceof AcpFailure && error.code === METHOD_NOT_FOUND)) throw error; });
-      session.model = record.model;
+      session.model = model;
     }
   };
 
@@ -241,7 +265,7 @@ export function createGeminiSession(host: SessionHost): GeminiSession {
     if (next) {
       host.emit("thread/queue/changed", { threadId });
       void startTurn({ input: next.input, clientUserMessageId: next.clientUserMessageId })
-        .catch((failure: unknown) => host.logger.warn("gemini.queue.start-failed", { threadId, error: String(failure) }));
+        .catch((failure: unknown) => host.logger.warn("antigravity.queue.start-failed", { threadId, error: String(failure) }));
     }
   };
 
@@ -261,10 +285,10 @@ export function createGeminiSession(host: SessionHost): GeminiSession {
       // A prompt stopped early may never have reached the model: a session new to the chat gets its history again.
       if (!stopped) session.fresh = false;
       // The context is full: the answer was cut short.
-      const error = result.stopReason === "max_tokens" ? "Gemini stopped: the model's context window or output limit was reached." : null;
+      const error = result.stopReason === "max_tokens" ? "Antigravity stopped: the model's context window or output limit was reached." : null;
       finish(running, stopped ? "interrupted" : error ? "failed" : "completed", error, promptUsage(result.usage), session.fresh ? undefined : session);
     } catch (error) {
-      host.logger.warn("gemini.turn.failed", { threadId, error: String(error) });
+      host.logger.warn("antigravity.turn.failed", { threadId, error: String(error) });
       // What the CLI session holds of this turn is unknown: the next message opens it anew.
       closeProcess();
       finish(running, running.interrupted ? "interrupted" : "failed", failureText(error), NO_USAGE, undefined);
@@ -272,7 +296,7 @@ export function createGeminiSession(host: SessionHost): GeminiSession {
   };
 
   const startTurn = async (params: JsonObject): Promise<Turn> => {
-    if (turn) throw invalidRequest("A Gemini turn is running: queue the message, or stop the turn first.");
+    if (turn) throw invalidRequest("An Antigravity turn is running: queue the message, or stop the turn first.");
     const input: UserInput[] = (params.input ?? []).map((item: UserInput) => item.type === "text" ? { type: "text", text: item.text, text_elements: item.text_elements ?? [] } : item);
     const atMs = host.now();
     activeAt = atMs;

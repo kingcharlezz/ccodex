@@ -18,7 +18,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     improveModelsFormatting: true,
     claudeVisualize: true,
     claudeIdleCompactionHoldMs: 86_400_000,
-    geminiModelPrefix: "gemini:",
+    antigravityModelPrefix: "antigravity:",
     ...overrides,
   };
 }
