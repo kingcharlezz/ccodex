@@ -87,14 +87,17 @@ describe("Antigravity chats (black box: fake stock + fake Antigravity CLI over A
     expect(done.turn.status).toBe("completed");
     const methods = client.messages.filter((message) => message.params?.threadId === threadId && message.id === undefined).map((message) => message.method);
     expect(methods.indexOf("turn/started")).toBeLessThan(methods.indexOf("item/started"));
-    expect(methods).toEqual(expect.arrayContaining(["item/reasoning/summaryPartAdded", "item/reasoning/summaryTextDelta", "item/agentMessage/delta", "thread/tokenUsage/updated", "turn/completed"]));
+    expect(methods).toEqual(expect.arrayContaining(["item/agentMessage/delta", "thread/tokenUsage/updated", "turn/completed"]));
+    // No reasoning item: the App shows one only as a passing status line.
+    expect(methods.filter((method) => method.startsWith("item/reasoning/"))).toEqual([]);
     // The answer streams in the chunks the CLI sent; the CLI's own mode notice is no part of it.
-    const deltas = client.notifications("item/agentMessage/delta", threadId).map((message) => message.params.delta).join("");
+    const messages = client.notifications("item/completed", threadId).map((message) => message.params.item).filter((item) => item.type === "agentMessage");
+    // The thought stays in the chat as commentary; the answer follows it.
+    expect(messages.map((item) => [item.text, item.phase])).toEqual([["> **Thinking**\n> about it", "commentary"], ["agy[gemini-4-carbon-medium/default]: hello", "final_answer"]]);
+    const deltas = client.notifications("item/agentMessage/delta", threadId).filter((message) => message.params.itemId === messages[1].id).map((message) => message.params.delta).join("");
     expect(deltas).toBe("agy[gemini-4-carbon-medium/default]: hello");
-    const answer = client.notifications("item/completed", threadId).map((message) => message.params.item).find((item) => item.type === "agentMessage");
-    expect(answer).toMatchObject({ text: "agy[gemini-4-carbon-medium/default]: hello", phase: "final_answer" });
     expect(client.notifications("thread/tokenUsage/updated", threadId).at(-1)!.params.tokenUsage).toMatchObject({ modelContextWindow: 1_048_576, last: { totalTokens: 1500 } });
-    expect(await history(threadId)).toEqual(["user:hello", "reasoning", "agent:agy[gemini-4-carbon-medium/default]: hello"]);
+    expect(await history(threadId)).toEqual(["user:hello", "agent:> **Thinking**\n> about it", "agent:agy[gemini-4-carbon-medium/default]: hello"]);
     const { thread } = await client.request("thread/read", { threadId });
     expect(thread).toMatchObject({ modelProvider: "antigravity", model: AGY, preview: "hello", cwd, status: { type: "idle" } });
     const page = await client.request("thread/turns/list", { threadId, limit: 5 });
@@ -256,7 +259,7 @@ describe("Antigravity chats (black box: fake stock + fake Antigravity CLI over A
     client = await gateway.connect();
     const listed = (await client.request("thread/list", { limit: 50 })).data.find((thread: any) => thread.id === threadId);
     expect(listed).toMatchObject({ name: "Kept", preview: "first", status: { type: "notLoaded" } });
-    expect(await history(threadId)).toEqual(["user:first", "reasoning", "agent:agy[gemini-4-carbon-medium/default]: first"]);
+    expect(await history(threadId)).toEqual(["user:first", "agent:> **Thinking**\n> about it", "agent:agy[gemini-4-carbon-medium/default]: first"]);
     await client.request("thread/resume", { threadId });
     await client.turn(threadId, "recall");
     // The CLI loaded its session: it remembers the first message itself, nothing was handed over, and what the load
@@ -287,7 +290,7 @@ describe("Antigravity chats (black box: fake stock + fake Antigravity CLI over A
     await client.turn(threadId, "one");
     await client.turn(threadId, "two");
     const rolled = await client.request("thread/rollback", { threadId, numTurns: 1 });
-    expect(itemsOf(rolled.thread.turns)).toEqual(["user:one", "reasoning", "agent:agy[gemini-4-carbon-medium/default]: one"]);
+    expect(itemsOf(rolled.thread.turns)).toEqual(["user:one", "agent:> **Thinking**\n> about it", "agent:agy[gemini-4-carbon-medium/default]: one"]);
     await client.turn(threadId, "recall");
     const recalled = (await history(threadId)).at(-1)!;
     expect(recalled).toContain("recall: ;");
@@ -309,7 +312,7 @@ describe("Antigravity chats (black box: fake stock + fake Antigravity CLI over A
     const firstTurn = (await client.request("thread/turns/list", { threadId, limit: 10, sortDirection: "asc" })).data[0].id;
     const fork = await client.request("thread/fork", { threadId, lastTurnId: firstTurn });
     expect(fork.thread).toMatchObject({ forkedFromId: threadId, modelProvider: "antigravity" });
-    expect(itemsOf(fork.thread.turns)).toEqual(["user:one", "reasoning", "agent:agy[gemini-4-carbon-medium/default]: one"]);
+    expect(itemsOf(fork.thread.turns)).toEqual(["user:one", "agent:> **Thinking**\n> about it", "agent:agy[gemini-4-carbon-medium/default]: one"]);
     await client.turn(fork.thread.id, "recall");
     expect((await history(fork.thread.id)).at(-1)).toContain("User: one");
     expect(await history(threadId)).toHaveLength(6);
@@ -347,7 +350,7 @@ describe("Antigravity chats (black box: fake stock + fake Antigravity CLI over A
     await client.request("thread/settings/update", { threadId: picked, model: AGY });
     expect(client.notifications("thread/settings/updated", picked).at(-1)!.params.threadSettings).toMatchObject({ model: AGY, modelProvider: "antigravity", cwd });
     await client.turn(picked, "first");
-    expect(await history(picked)).toEqual(["user:first", "reasoning", "agent:agy[gemini-4-carbon-medium/default]: first"]);
+    expect(await history(picked)).toEqual(["user:first", "agent:> **Thinking**\n> about it", "agent:agy[gemini-4-carbon-medium/default]: first"]);
     const row = (await client.request("thread/list", { limit: 50 })).data.filter((thread: any) => thread.id === picked);
     expect(row).toHaveLength(1);
     expect(row[0]).toMatchObject({ modelProvider: "antigravity", preview: "first" });

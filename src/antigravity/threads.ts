@@ -3,9 +3,10 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { rename, writeFile } from "node:fs/promises";
+import { rename as renameFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { v7 as uuidv7 } from "uuid";
+import { bashCommandActions } from "../claude/commandActions.js";
 import { findAntigravity, type Config } from "../config.js";
 import type { Logger } from "../log.js";
 import type { Meta } from "../meta.js";
@@ -114,7 +115,7 @@ export function createAntigravityThreads<C extends Client>(host: AntigravityHost
     if (!listed.length || JSON.stringify(listed) === JSON.stringify(cliModels)) return;
     useModels(listed);
     const temporary = `${modelsPath}.${process.pid}.tmp`;
-    void writeFile(temporary, JSON.stringify({ models: listed }), { mode: 0o600 }).then(() => rename(temporary, modelsPath))
+    void writeFile(temporary, JSON.stringify({ models: listed }), { mode: 0o600 }).then(() => renameFile(temporary, modelsPath))
       .catch((error: unknown) => logger.warn("antigravity.models.unsaved", { error: String(error) }));
   };
 
@@ -156,6 +157,7 @@ export function createAntigravityThreads<C extends Client>(host: AntigravityHost
       spawn: (cwd) => antigravitySpawn(antigravityBinary() ?? "agy", cwd),
       cliModel: (record) => cliModelId(models, record.model, record.effort),
       read: readText,
+      commandActions: bashCommandActions,
       record: () => recordOf(threadId),
       append: (events) => append(threadId, events),
       emit: (method, params) => host.emit(threadId, method, params),
