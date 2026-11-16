@@ -11,7 +11,7 @@ const collapse = (text: string) => text.replace(/\s+/gu, " ").trim();
 /**
  * With `rename_prompt` set, CCodex names every new thread itself: after the first `turn/start` one ephemeral
  * stock turn on the title model writes the title. Desktop's own title turn gets an empty answer, and its
- * provisional prompt-prefix names are ignored. Claude threads get the ` ✳️` suffix.
+ * provisional prompt-prefix names are ignored. Claude threads get the ` ✳️` suffix, Gemini threads ` ✦`.
  */
 export class Titles {
   /** New threads waiting for their first turn. */
@@ -65,7 +65,8 @@ export class Titles {
     title = collapse(title.split("\n").find((line) => line.trim()) ?? "").replace(/^["'`*_]+|["'`*_]+$/gu, "");
     // The user named the thread meanwhile.
     if (!title || !this.generating.has(threadId)) return;
-    if (this.gateway.claude.owns(threadId)) await this.gateway.claude.rename(threadId, `${title} ✳️`);
+    if (this.gateway.gemini.owns(threadId)) this.gateway.gemini.rename(threadId, `${title} ✦`);
+    else if (this.gateway.claude.owns(threadId)) await this.gateway.claude.rename(threadId, `${title} ✳️`);
     else await this.gateway.stock.request("thread/name/set", { threadId, name: title });
   }
 

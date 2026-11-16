@@ -33,6 +33,7 @@ claude_idle_compaction_hold_hours = 24
 # codex_binary = "/path/to/codex"   # default: Desktop's own CLI when this machine's Desktop starts CCodex, else the newest `codex`
 # delegate_codex = "/path/to/codex" # what plain `codex …` (TUI, exec, login) runs; default: codex_binary, else the first `codex` on PATH
 # claude_binary = "/path/to/claude" # default: the Claude Code bundled with the Agent SDK
+# gemini_binary = "/path/to/gemini" # default: the first `gemini` on PATH (or where npm and Homebrew put one); none: no Gemini models
 # data_dir = "~/.ccodex/state"
 # model_prefix = "claude:"
 

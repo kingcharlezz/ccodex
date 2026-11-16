@@ -46,6 +46,43 @@ Claude chats follow the App's own controls:
 | Reasoning effort | effort (`ultra` = `max` + proactive sub-agents) |
 | Fast | Claude fast mode |
 
+## Gemini chats
+
+With the [Gemini CLI](https://github.com/google-gemini/gemini-cli) on the machine
+(`npm i -g @google/gemini-cli`, signed in once with `ccodex auth gemini`), the model picker
+also lists Gemini's models (ids `gemini:…`). A chat started with one runs on the CLI in
+its ACP mode (`gemini --acp`), with your Google login and the CLI's own settings in
+`~/.gemini`. Without the CLI, CCodex lists no Gemini models; `ccodex doctor` says whether
+it found one.
+
+In a Gemini chat the App shows the answer and the thinking as they stream, commands and
+file changes with their diffs, and its approval prompts. Plan mode, Stop, queued messages,
+images, fork, message edits, side chats, rename, archive, delete, search, the context
+meter, `/cc` and titles (with a ` ✦` suffix) work as in other chats.
+
+| Codex App | Gemini CLI approval mode |
+|---|---|
+| *Full Access* | `yolo` |
+| *Ask for approval* | `default` |
+| *Approve for me* | `autoEdit`: edits go through, commands still ask |
+| Plan mode | `plan` |
+
+Not supported in Gemini chats:
+
+- Switching a chat that has messages to or from another provider: pick the model for a new
+  chat before its first message. (A new chat the App opened with a Gemini model can still
+  become a Claude chat before that, but not a GPT one: open another new chat for GPT.)
+- A message sent into a running turn (queue it instead), `/goal`, `/compact` (the CLI
+  compresses a long chat itself) and `/review`.
+- Reasoning effort and plan limits: the CLI takes no effort level and reports no limits.
+- Chats from `gemini` in a terminal don't show up in the App.
+
+CCodex keeps a Gemini chat's history in `~/.ccodex/state/gemini/<thread id>.jsonl`, an
+append-only log; a deleted chat's log goes to the trash like a Claude transcript. The CLI
+keeps the model's context in a session of its own. After a fork, an edit or a rollback,
+or when the CLI no longer has the session, the chat's next message opens a new session
+and brings the chat so far along as a transcript.
+
 ## How it works
 
 CCodex is a thin gateway in front of your installed `codex app-server`: the App starts
@@ -123,6 +160,8 @@ Claude's 30-day cleanup deleted come back as text. The 0.4 databases move to
   App shows a remote host's image or video): a bigger answer fails, a bigger notification is dropped, the output stops
   there. One huge message holds up every chat over SSH and can drop the phone's connection. `0` turns it off.
 - `log_level` — `debug`, `info` (default), `warn`, `error`.
+- `gemini_binary` — use a specific Gemini CLI. Without it CCodex runs the first `gemini` on `PATH`, or the one in
+  `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` or `~/.npm-global/bin`.
 - `codex_binary`, `delegate_codex`, `claude_binary` — use a specific `codex` or `claude`. Without `codex_binary`, the
   gateway runs Desktop's own Codex CLI when the Desktop on this machine starts it (the one Desktop runs without
   CCodex), otherwise the newest `codex` on the machine; a plain `codex …` in a terminal runs the first one on PATH.

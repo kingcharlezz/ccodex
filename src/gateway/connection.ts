@@ -6,7 +6,7 @@ import { rpcError, type JsonObject, type RequestId } from "../protocol/codex.js"
 import type { Gateway } from "./server.js";
 import type { StockClient } from "./stock.js";
 
-/** Methods that take an optional threadId only as context; for Claude threads it is dropped and stock answers. */
+/** Methods that take an optional threadId only as context; for Claude and Gemini threads it is dropped and stock answers. */
 const THREAD_CONTEXT_METHODS = new Set([
   "app/installed", "app/list", "app/read", "experimentalFeature/list", "feedback/upload", "mcpServerStatus/list",
   "mcpServer/tool/call", "mcpServer/resource/read", "mcpServer/oauth/login", "mcpServer/event/stream/start",
@@ -25,7 +25,7 @@ export class Connection {
   public readonly id = randomUUID();
   public clientName?: string;
   /** Provider of the thread this client last worked in (rate limits follow it). */
-  public provider: Provider = "codex";
+  public provider: Provider | "gemini" = "codex";
   /** Ephemeral threads this client is creating: only their creator hears of them (stock tells every client). */
   public readonly ephemeralRequests = new Set<RequestId>();
   /** The developer instructions this client last sent; the stock threads the gateway starts or resumes for it get them too. */
@@ -165,7 +165,7 @@ export class Connection {
     const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
     const own = gateway.handlers.get(method);
     if (own) return own;
-    if (threadId && THREAD_CONTEXT_METHODS.has(method) && gateway.isClaudeThread(threadId)) {
+    if (threadId && THREAD_CONTEXT_METHODS.has(method) && (gateway.isClaudeThread(threadId) || gateway.gemini.owns(threadId))) {
       const { threadId: _, ...rest } = params;
       return () => this.upstream.request(method, rest);
     }

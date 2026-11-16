@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { delegate } from "../cli/delegate.js";
-import { claudeHome, codexVersion, defaultConfigToml, displacedCodexPath, findInstalledCodex, installedCodexes, isCcodex, productHome, remoteCodexPath, stockCodex, type Config } from "../config.js";
+import { claudeHome, codexVersion, defaultConfigToml, displacedCodexPath, findGemini, findInstalledCodex, installedCodexes, isCcodex, productHome, remoteCodexPath, stockCodex, type Config } from "../config.js";
 import { probeAppServer } from "../daemon/probe.js";
 import { reconcileManagedProcess, stopManagedProcess } from "../daemon/supervisor.js";
 import { reconcileOwnedGateway, stopSocketOwner } from "../daemon/ownership.js";
@@ -367,6 +367,13 @@ export async function doctor(config: Config, json: boolean): Promise<number> {
       if (!status.loggedIn) throw new Error("not logged in → run: ccodex auth claude");
       return `${status.email ?? "logged in"} (${status.authMethod ?? "unknown"})`;
     }),
+    // Optional: without the Gemini CLI, CCodex offers no Gemini models.
+    check("gemini", async () => {
+      const gemini = findGemini(config);
+      if (!gemini) return { detail: "not installed (optional)", warning: "for Gemini models run: npm i -g @google/gemini-cli" };
+      const signedIn = existsSync(join(homedir(), ".gemini", "oauth_creds.json")) || Boolean(process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY);
+      return { detail: `${gemini} (${await version(gemini, ["--version"])})`, ...signedIn ? {} : { warning: "no Google login found → run: ccodex auth gemini" } };
+    }),
     check("relay", () => {
       const binary = relayBinary();
       if (!existsSync(binary)) throw new Error(`missing: ${binary}`);
@@ -399,7 +406,13 @@ export async function runManagementCommand(args: readonly string[], config: () =
     case "auth":
       if (args[1] === "codex") return delegate(config().codex, ["login"]);
       if (args[1] === "claude") return delegate(config().claudeBinary, ["auth", "login"]);
-      throw new Error("Usage: ccodex auth codex|claude");
+      if (args[1] === "gemini") {
+        const gemini = findGemini(config());
+        if (!gemini) throw new Error("No `gemini` found. Install it with `npm i -g @google/gemini-cli` or set gemini_binary in ~/.ccodex/config.toml.");
+        // The Gemini CLI has no login command: its first start asks to sign in.
+        return delegate(gemini, []);
+      }
+      throw new Error("Usage: ccodex auth codex|claude|gemini");
     default: return undefined;
   }
 }

@@ -64,7 +64,7 @@ export class Catalog {
     const meta = this.gateway.meta;
     if (params.excludedThreadIds?.includes(thread.id)) return false;
     if ((params.archived ?? false) !== meta.isArchived(thread.id)) return false;
-    if (params.modelProviders?.length && !params.modelProviders.includes("claude")) return false;
+    if (params.modelProviders?.length && !params.modelProviders.includes(thread.modelProvider)) return false;
     const kinds: string[] | undefined = params.sourceKinds?.length ? params.sourceKinds : undefined;
     if (kinds ? !kinds.includes(sourceKind(thread)) : thread.parentThreadId) return false;
     if (params.cwd) {
@@ -95,6 +95,8 @@ export class Catalog {
     let threads = claude.threads();
     if (ancestor && claude.owns(ancestor)) threads = await claude.subagentThreads(ancestor);
     else if (ancestor) threads = [];
+    // Gemini chats are rows like Claude's (they have no sub-agent threads).
+    else threads = [...threads, ...this.gateway.gemini.threads()];
     return threads.filter((thread) => this.claudeMatches(thread, params));
   }
 
@@ -173,7 +175,8 @@ export class Catalog {
     }
     const claude = await this.project(await this.claudeThreads(params));
     const { threads: stock, done: complete } = await this.stockThreads(connection, { ...params, limit }, offset + limit, !params.cursor);
-    const shown = await this.project(stock);
+    // A stock draft that became a Gemini chat under its id is the Gemini layer's row.
+    const shown = await this.project(stock.filter((thread) => !this.gateway.gemini.owns(thread.id)));
     let merged = this.merge(shown, claude, params);
     // Without all stock rows, only the part of the merge that no unseen stock row can precede is final (the last
     // stock row read may itself be hidden or projected: its sort value is the boundary).
@@ -223,6 +226,7 @@ export class Catalog {
       if (!snippets.has(owner)) snippets.set(owner, snippet);
     };
     for (const [id, snippet] of await claudeHits) add(id, snippet);
+    for (const [id, snippet] of this.gateway.gemini.search(searchTerm)) add(id, snippet);
     for (const result of stockResults) add(result.thread.id, result.snippet);
     const claude = (await this.project(await this.claudeThreads({ archived: params.archived, sourceKinds: params.sourceKinds })))
       .flatMap((thread) => snippets.has(thread.id) ? [{ thread, snippet: snippets.get(thread.id)! }] : []);
@@ -248,7 +252,7 @@ export class Catalog {
       cursor = page.nextCursor;
     } while (cursor);
     const rewrites = this.gateway.meta.rewrites;
-    const ids = [...stock, ...this.gateway.claude.loadedIds()].map((id) => rewrites.get(id) ?? id)
+    const ids = [...stock, ...this.gateway.claude.loadedIds(), ...this.gateway.gemini.loadedIds()].map((id) => rewrites.get(id) ?? id)
       .filter((id) => !this.gateway.lineages.isHidden(id));
     const unique = [...new Set(ids)];
     const limit = Math.max(1, Math.min(Number(params.limit ?? 100), 100));
@@ -264,7 +268,7 @@ export class Catalog {
   public async moveInSection(connection: Connection, params: JsonObject): Promise<JsonObject> {
     const { threadId, sectionId, beforeThreadId } = params as { threadId: string; sectionId: string | null; beforeThreadId?: string | null };
     const meta = this.gateway.meta;
-    const isClaude = (id: string) => this.gateway.claude.owns(id);
+    const isClaude = (id: string) => this.gateway.claude.owns(id) || this.gateway.gemini.owns(id);
     const members = sectionId === null ? [] : (await this.list(connection, { sectionId, sortKey: "section_position", limit: 200, archived: false })).data as Thread[];
     const order = members.map((thread) => thread.id).filter((id) => id !== threadId);
     if (!isClaude(threadId) && !order.some(isClaude)) return connection.upstream.request("thread/section/move", params);
@@ -282,7 +286,7 @@ export class Catalog {
 
   /** Mobile (codex-backend) learns about threads from notifications: announce every Claude thread once. */
   public async announce(connection: Connection): Promise<void> {
-    for (const thread of this.gateway.claude.threads()) {
+    for (const thread of [...this.gateway.claude.threads(), ...this.gateway.gemini.threads()]) {
       if (thread.parentThreadId) continue;
       connection.notify("thread/started", { thread: { ...thread, turns: [] } });
       if (thread.name) connection.notify("thread/name/updated", { threadId: thread.id, threadName: thread.name });
