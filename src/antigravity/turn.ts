@@ -16,14 +16,14 @@ export interface TurnState {
   readonly startedAtMs: number;
   /** The turn's items in order: finished ones, and the open ones as they stand. */
   readonly items: readonly ThreadItem[];
-  /** The agent message and the reasoning item still streaming (their item ids). */
+  /** The agent message and the thought still streaming (their item ids). */
   readonly message: string | null;
-  readonly reasoning: string | null;
+  readonly thought: string | null;
   /** Tool calls in progress: when each started. */
   readonly tools: Readonly<Record<string, number>>;
   /** Tool calls the user (or the chat's never-ask setting) declined: their failure is no error of the tool's. */
   readonly declined: readonly string[];
-  /** How many message and reasoning items the turn opened (their ids count up). */
+  /** How many messages and thoughts the turn opened (their ids count up). */
   readonly opened: number;
   /** Context in use and the model's window, as the CLI last told them. */
   readonly context: { readonly used: number; readonly size: number } | null;
@@ -35,7 +35,7 @@ export interface Step {
 }
 
 export function openTurn(turn: { threadId: string; turnId: string; cwd: string; startedAtMs: number }): TurnState {
-  return { ...turn, items: [], message: null, reasoning: null, tools: {}, declined: [], opened: 0, context: null };
+  return { ...turn, items: [], message: null, thought: null, tools: {}, declined: [], opened: 0, context: null };
 }
 
 const step = (state: TurnState, ...out: Notification[]): Step => ({ state, out });
@@ -78,15 +78,16 @@ function closeMessage(state: TurnState, phase: string | null, atMs: number): Ste
   return step({ ...withItem(state, done), message: null }, completed(state, done, atMs));
 }
 
-function closeReasoning(state: TurnState, atMs: number): Step {
-  const item = itemOf(state, state.reasoning);
-  if (item?.type !== "reasoning") return step({ ...state, reasoning: null });
-  return step({ ...state, reasoning: null }, completed(state, item, atMs));
+/** The thought so far ends: it stays in the chat as commentary, never as the turn's answer. */
+function closeThought(state: TurnState, atMs: number): Step {
+  const item = itemOf(state, state.thought);
+  if (item?.type !== "agentMessage") return step({ ...state, thought: null });
+  return step({ ...state, thought: null }, completed(state, item, atMs));
 }
 
 /** What still streams ends before something else starts: the items keep the order things happened in. */
 const settle = (atMs: number) => (state: TurnState): Step =>
-  chain(state, (current) => closeMessage(current, "commentary", atMs), (current) => closeReasoning(current, atMs));
+  chain(state, (current) => closeMessage(current, "commentary", atMs), (current) => closeThought(current, atMs));
 
 /** The CLI's own notice of an approval mode change, sent as if the model said it. */
 const MODE_NOTICE = /^\[MODE_UPDATE\] /u;
@@ -98,7 +99,7 @@ function messageChunk(state: TurnState, text: string, atMs: number): Step {
     const item: ThreadItem = { ...open, text: `${open.text}${text}` };
     return step(withItem(state, item), { method: "item/agentMessage/delta", params: { threadId: state.threadId, turnId: state.turnId, itemId: item.id, delta: text } });
   }
-  return chain(state, (current) => closeReasoning(current, atMs), (current) => {
+  return chain(state, (current) => closeThought(current, atMs), (current) => {
     const id = `${current.turnId}:m${current.opened}`;
     const item: ThreadItem = { type: "agentMessage", id, text, phase: null, memoryCitation: null };
     return step(
@@ -109,26 +110,38 @@ function messageChunk(state: TurnState, text: string, atMs: number): Step {
   });
 }
 
-/** A thought of the model's: a part of the reasoning item the App shows as thinking. */
+/**
+ * A thought of the model's, shown as commentary: a message that stays in the chat while the work it leads to runs.
+ * The Antigravity CLI sends a thought whole, just before the tool call it leads to, and its models write no other
+ * text between their tool calls. As a reasoning item the App would show it as a status line for that instant only,
+ * and the chat would read as a row of commands.
+ */
 function thoughtChunk(state: TurnState, text: string, atMs: number): Step {
   if (!text.trim()) return step(state);
-  const part = (current: TurnState, item: ThreadItem & { type: "reasoning" }): Step => {
-    const summaryIndex = item.summary.length;
-    const next: ThreadItem = { ...item, summary: [...item.summary, text] };
-    const at = { threadId: current.threadId, turnId: current.turnId, itemId: item.id, summaryIndex };
-    return step(withItem(current, next), { method: "item/reasoning/summaryPartAdded", params: at }, { method: "item/reasoning/summaryTextDelta", params: { ...at, delta: text } });
-  };
-  const open = itemOf(state, state.reasoning);
-  if (open?.type === "reasoning") return part(state, open);
+  const delta = (current: TurnState, item: ThreadItem & { type: "agentMessage" }, added: string): Step => step(
+    withItem(current, { ...item, text: `${item.text}${added}` }),
+    { method: "item/agentMessage/delta", params: { threadId: current.threadId, turnId: current.turnId, itemId: item.id, delta: added } },
+  );
+  // Quoted, so it reads as the model's thinking and not as what it tells the user.
+  const quoted = text.trim().split(/\r?\n/u).map((line) => line ? `> ${line}` : ">").join("\n");
+  const open = itemOf(state, state.thought);
+  // One thought after another: paragraphs of the same quote.
+  if (open?.type === "agentMessage") return delta(state, open, `\n>\n${quoted}`);
   return chain(state, (current) => closeMessage(current, "commentary", atMs), (current) => {
-    const item = { type: "reasoning" as const, id: `${current.turnId}:r${current.opened}`, summary: [], content: [] };
-    const opened = step({ ...withItem(current, item), reasoning: item.id, opened: current.opened + 1 }, started(current, item, atMs));
-    const added = part(opened.state, item);
+    const item = { type: "agentMessage" as const, id: `${current.turnId}:t${current.opened}`, text: "", phase: "commentary", memoryCitation: null };
+    const opened = step({ ...withItem(current, item), thought: item.id, opened: current.opened + 1 }, started(current, item, atMs));
+    const added = delta(opened.state, item, quoted);
     return { state: added.state, out: [...opened.out, ...added.out] };
   });
 }
 
 // ---- tool calls ----
+
+/** A shell command as the App's actions: what it reads, lists or searches (the App shows those as such, not as a command). */
+export type ParseCommand = (command: string, cwd: string) => CommandAction[];
+
+/** No parser: the command as it is. */
+export const unparsed: ParseCommand = (command) => [{ type: "unknown", command }];
 
 interface ToolCall {
   readonly toolCallId: string;
@@ -176,7 +189,7 @@ function fileChanges(content: ToolCall["content"], cwd: string): FileUpdateChang
 const FILE_KINDS = new Set(["edit", "delete", "move"]);
 
 /** A tool call as the item the App has for its kind: a command, a file change, or a tool call of the agent's. */
-function toolItem(call: ToolCall, cwd: string): ThreadItem {
+function toolItem(call: ToolCall, cwd: string, parse: ParseCommand): ThreadItem {
   const title = call.title?.trim() || call.kind || "tool";
   const changes = fileChanges(call.content, cwd);
   if (changes.length || FILE_KINDS.has(call.kind ?? "")) return { type: "fileChange", id: call.toolCallId, changes, status: "inProgress" };
@@ -185,7 +198,12 @@ function toolItem(call: ToolCall, cwd: string): ThreadItem {
     status: "inProgress", commandActions, aggregatedOutput: null, exitCode: null, durationMs: null,
   });
   const location = call.locations?.find((entry) => entry.path)?.path;
-  if (call.kind === "execute") return command(title, [{ type: "unknown", command: title }]);
+  if (call.kind === "execute") {
+    // The command line itself, where the CLI tells it (the title may be a summary of it).
+    const line = typeof (call.rawInput as JsonObject | undefined)?.CommandLine === "string" ? String((call.rawInput as JsonObject).CommandLine) : title;
+    const actions = parse(line, cwd);
+    return command(line, actions.length ? actions : unparsed(line, cwd));
+  }
   if (call.kind === "read" && location) {
     const path = absolute(location, cwd);
     return command(`Read ${location}`, [{ type: "read", command: `Read ${location}`, name: basename(path) || path, path }]);
@@ -219,16 +237,16 @@ function endedTool(item: ThreadItem, call: ToolCall, cwd: string, declined: bool
 const ENDED = new Set(["completed", "failed"]);
 
 /** A tool call starts (`tool_call`) or goes on (`tool_call_update`: its fields as far as they changed). */
-function toolCall(state: TurnState, call: ToolCall, atMs: number): Step {
+function toolCall(state: TurnState, call: ToolCall, atMs: number, parse: ParseCommand): Step {
   const existing = itemOf(state, call.toolCallId);
   const ended = ENDED.has(call.status ?? "");
   if (!existing) {
     return chain(state, settle(atMs), (current) => {
-      const item = toolItem(call, current.cwd);
+      const item = toolItem(call, current.cwd, parse);
       const begun = step({ ...withItem(current, item), tools: { ...current.tools, [call.toolCallId]: atMs } }, started(current, item, atMs));
       // A call the CLI tells only once it is over (it needed no approval and took no time).
       if (!ended) return begun;
-      const over = toolCall(begun.state, call, atMs);
+      const over = toolCall(begun.state, call, atMs, parse);
       return { state: over.state, out: [...begun.out, ...over.out] };
     });
   }
@@ -290,7 +308,7 @@ export function usageNotification(threadId: string, turnId: string | null, conte
 // ---- the fold ----
 
 /** One `session/update` of the turn's session. `total`: the chat's tokens before this turn. */
-export function applyUpdate(state: TurnState, update: JsonObject, atMs: number, total: TokenUsageBreakdown = NO_USAGE): Step {
+export function applyUpdate(state: TurnState, update: JsonObject, atMs: number, total: TokenUsageBreakdown = NO_USAGE, parse: ParseCommand = unparsed): Step {
   switch (update.sessionUpdate) {
     case "agent_message_chunk":
       return update.content?.type === "text" ? messageChunk(state, String(update.content.text ?? ""), atMs) : step(state);
@@ -298,7 +316,7 @@ export function applyUpdate(state: TurnState, update: JsonObject, atMs: number, 
       return update.content?.type === "text" ? thoughtChunk(state, String(update.content.text ?? ""), atMs) : step(state);
     case "tool_call":
     case "tool_call_update":
-      return typeof update.toolCallId === "string" ? toolCall(state, update as unknown as ToolCall, atMs) : step(state);
+      return typeof update.toolCallId === "string" ? toolCall(state, update as unknown as ToolCall, atMs, parse) : step(state);
     case "plan":
       return Array.isArray(update.entries) ? planUpdate(state, update.entries) : step(state);
     case "usage_update": {
@@ -319,7 +337,7 @@ export function applyUpdate(state: TurnState, update: JsonObject, atMs: number, 
 export function closeTurn(state: TurnState, status: Exclude<TurnStatus, "inProgress">, atMs: number): Step {
   return chain(state,
     (current) => closeMessage(current, status === "completed" ? "final_answer" : null, atMs),
-    (current) => closeReasoning(current, atMs),
+    (current) => closeThought(current, atMs),
     (current) => Object.keys(current.tools).reduce<Step>((done, id) => {
       const item = itemOf(done.state, id);
       if (!item) return done;

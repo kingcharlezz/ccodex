@@ -33,21 +33,38 @@ describe("an Antigravity turn folded from ACP session updates", () => {
     expect(state.items).toEqual([]);
   });
 
-  it("shows each thought as a part of one reasoning item, which ends when the answer starts", () => {
+  it("shows a thought as commentary that stays in the chat: its paragraphs one message, ended by what follows it", () => {
     const { state, out } = fold(fresh(), [
-      { sessionUpdate: "agent_thought_chunk", content: text("**A**\nfirst") },
-      { sessionUpdate: "agent_thought_chunk", content: text("**B**\nsecond") },
+      { sessionUpdate: "agent_thought_chunk", content: text("Looking for the config.") },
+      { sessionUpdate: "agent_thought_chunk", content: text("It is likely in src.") },
+      { sessionUpdate: "tool_call", toolCallId: "c", status: "in_progress", title: "ls src", kind: "execute" },
+      { sessionUpdate: "agent_thought_chunk", content: text("Found it.") },
       { sessionUpdate: "agent_message_chunk", content: text("answer") },
     ]);
     expect(methods(out)).toEqual([
-      "item/started", "item/reasoning/summaryPartAdded", "item/reasoning/summaryTextDelta",
-      "item/reasoning/summaryPartAdded", "item/reasoning/summaryTextDelta",
-      "item/completed", "item/started", "item/agentMessage/delta",
+      "item/started", "item/agentMessage/delta", "item/agentMessage/delta", "item/completed",
+      "item/started",
+      "item/started", "item/agentMessage/delta", "item/completed",
+      "item/started", "item/agentMessage/delta",
     ]);
-    expect(out[3]!.params).toMatchObject({ itemId: "turn:r0", summaryIndex: 1 });
-    expect(out[5]!.params.item).toEqual({ type: "reasoning", id: "turn:r0", summary: ["**A**\nfirst", "**B**\nsecond"], content: [] });
-    expect(state.reasoning).toBeNull();
-    expect(state.message).toBe("turn:m1");
+    expect(methods(out).filter((method) => method.startsWith("item/reasoning/"))).toEqual([]);
+    expect(out[0]!.params.item).toEqual({ type: "agentMessage", id: "turn:t0", text: "", phase: "commentary", memoryCitation: null });
+    expect(out[3]!.params.item).toMatchObject({ id: "turn:t0", text: "> Looking for the config.\n>\n> It is likely in src.", phase: "commentary" });
+    expect(state.thought).toBeNull();
+    expect(state.message).toBe("turn:m2");
+    // A thought the turn ends on stays commentary: it is never the turn's answer.
+    const ended = closeTurn(fold(fresh(), [{ sessionUpdate: "agent_thought_chunk", content: text("Thinking still.") }]).state, "completed", 3_000);
+    expect(ended.state.items).toEqual([{ type: "agentMessage", id: "turn:t0", text: "> Thinking still.", phase: "commentary", memoryCitation: null }]);
+  });
+
+  it("shows a shell command as what it reads, lists or searches, from the command line the CLI tells", () => {
+    const parse = (command: string) => command.startsWith("cat ") ? [{ type: "read" as const, command, name: "a.ts", path: "/work/a.ts" }] : [];
+    const run = (update: object) => applyUpdate(fresh(), update, 2_000, NO_USAGE, parse).state.items[0];
+    expect(run({ sessionUpdate: "tool_call", toolCallId: "c", status: "in_progress", title: "Show a.ts", kind: "execute", rawInput: { CommandLine: "cat a.ts" } }))
+      .toMatchObject({ type: "commandExecution", command: "cat a.ts", commandActions: [{ type: "read", name: "a.ts", path: "/work/a.ts" }] });
+    // A command the parser makes nothing of, and one told only by its title: the command as it is.
+    expect(run({ sessionUpdate: "tool_call", toolCallId: "c", status: "in_progress", title: "make build", kind: "execute" }))
+      .toMatchObject({ command: "make build", commandActions: [{ type: "unknown", command: "make build" }] });
   });
 
   it("ends what was said before a tool call as commentary, and the last message as the answer", () => {

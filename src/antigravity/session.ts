@@ -12,7 +12,7 @@ import { promptBlocks } from "./input.js";
 import type { CliModel } from "./models.js";
 import { approvalRequest, antigravityMode, permissionOutcome, unaskedDecision, type PermissionOption } from "./permissions.js";
 import { handoff, type ThreadEvent, type ThreadRecord } from "./store.js";
-import { addUsage, applyUpdate, closeTurn, declineTool, NO_USAGE, openTurn, promptUsage, turnRecord, userMessage, type Notification, type TurnState } from "./turn.js";
+import { addUsage, applyUpdate, closeTurn, declineTool, NO_USAGE, openTurn, promptUsage, turnRecord, userMessage, type Notification, type ParseCommand, type TurnState } from "./turn.js";
 
 /** ACP's "authentication required". */
 const AUTH_REQUIRED = -32000;
@@ -52,6 +52,8 @@ export interface SessionHost {
   onModels(models: readonly CliModel[]): void;
   /** What a file holds now (undefined: no such file). */
   read: ReadText;
+  /** A shell command as what it reads, lists or searches. */
+  commandActions: ParseCommand;
   onTurnCompleted(turnId: string): void;
   now(): number;
 }
@@ -134,7 +136,7 @@ export function createAntigravitySession(host: SessionHost): AntigravitySession 
     }
     if (!turn || turn.interrupted) return;
     activeAt = host.now();
-    const next = applyUpdate(turn.state, params.update ?? {}, host.now(), host.record().total);
+    const next = applyUpdate(turn.state, params.update ?? {}, host.now(), host.record().total, host.commandActions);
     turn.state = next.state;
     send(next.out);
   };
@@ -150,7 +152,7 @@ export function createAntigravitySession(host: SessionHost): AntigravitySession 
     // The request carries the change's patch (a snippet, made whole here); a call the CLI did not tell shows from it.
     const known = running.state.items.some((item) => item.id === itemId);
     const content = Array.isArray(call.content) ? expandDiffs(call.content as JsonObject[], host.read) : call.content;
-    const shown = applyUpdate(running.state, { ...call, content, sessionUpdate: known ? "tool_call_update" : "tool_call", status: "pending" }, host.now());
+    const shown = applyUpdate(running.state, { ...call, content, sessionUpdate: known ? "tool_call_update" : "tool_call", status: "pending" }, host.now(), NO_USAGE, host.commandActions);
     running.state = shown.state;
     send(shown.out);
     const record = host.record();
